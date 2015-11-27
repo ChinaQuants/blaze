@@ -6,9 +6,12 @@ import tables as tb
 from datashape import Record, from_numpy, datetime_, date_
 
 from blaze.expr import (Selection, Head, Field, Broadcast, Projection, Symbol,
-                        Sort, Reduction, count, Slice, Expr, nelements)
+                        Sort, Reduction, count, Slice, Expr, nelements,
+                        UnaryOp, BinOp)
 from blaze.compatibility import basestring, map
+from blaze.expr.optimize import simple_selections
 from ..dispatch import dispatch
+from .numexpr import broadcast_numexpr_collect, print_numexpr
 
 
 __all__ = ['drop', 'create_index']
@@ -149,16 +152,18 @@ def compute_up(expr, x, **kwargs):
     return x[expr.index]
 
 
-from .numexpr import broadcast_numexpr_collect, print_numexpr
-from ..expr import Arithmetic, RealMath, USub, Not
-Broadcastable = (Arithmetic, RealMath, Field, Not, USub)
-WantToBroadcast = (Arithmetic, RealMath, Not, USub)
+Broadcastable = UnaryOp, BinOp, Field
+WantToBroadcast = UnaryOp, BinOp
 
 
 @dispatch(Expr, tb.Table)
 def optimize(expr, seq):
-    return broadcast_numexpr_collect(expr, Broadcastable=Broadcastable,
-                                     WantToBroadcast=WantToBroadcast)
+    return broadcast_numexpr_collect(
+        simple_selections(expr),
+        broadcastable=Broadcastable,
+        want_to_broadcast=WantToBroadcast,
+        no_recurse=Selection,
+    )
 
 
 @dispatch(nelements, tb.Table)

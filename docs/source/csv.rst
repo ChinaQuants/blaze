@@ -26,7 +26,7 @@ How does it work?
 
 Blaze primarily relies on Pandas to parse CSV files into DataFrames.  In the
 case of large CSV files it may parse them into several DataFrames and then use
-techniques laid out in the `out-of-core`_ section.
+techniques laid out in the :doc:`ooc` section.
 
 
 What to do when things go wrong
@@ -54,12 +54,18 @@ In the first case of incorrect guessing of CSV dialect (e.g. delimiter) Blaze
 respects and passes through all keyword arguments to `pandas.read_csv`_.
 
 
+.. note::
+
+   In the case of a CSV file with all string data, you must pass the
+   ``has_header=True`` argument if the first row is the header row.
+
+
 
 Correcting Column Types
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 In the second case of incorrect guessing of column types Blaze accepts a
-datashape_ as an additional keyword argument.  Common practice is to create a
+:doc:`datashape` as an additional keyword argument.  Common practice is to create a
 ``Data`` object around a csv file, ask for its datashape, tweak that datashape
 and then recreate the data object.
 
@@ -133,6 +139,4 @@ editing automatically generated datashapes
 
 Providing a datashape removes data type ambiguity from the transfer.
 
-.. _`out-of-core`: ../ooc.html
-.. _`datashape`: ../datashape.html
 .. _`pandas.read_csv`: http://pandas.pydata.org/pandas-docs/stable/generated/pandas.io.parsers.read_csv.html

@@ -3,6 +3,8 @@ from __future__ import absolute_import, division, print_function
 import pytest
 pytest.importorskip('flask')
 
+from base64 import b64encode
+
 import datashape
 import numpy as np
 from datetime import datetime
@@ -12,6 +14,7 @@ from toolz import pipe
 from odo import odo
 from blaze.utils import example
 from blaze import discover, symbol, by, CSV, compute, join, into, resource
+from blaze.server.client import mimetype
 from blaze.server.server import Server, to_tree, from_tree
 from blaze.server.serialization import all_formats
 
@@ -132,8 +135,9 @@ def test_compute(test, serial):
     expected = 300
 
     response = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
 
     assert 'OK' in response.status
@@ -148,8 +152,9 @@ def test_get_datetimes(test, serial):
     query = {'expr': to_tree(expr)}
 
     response = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
 
     assert 'OK' in response.status
@@ -167,8 +172,9 @@ def dont_test_compute_with_namespace(test, serial):
     expected = ['Alice', 'Bob']
 
     response = test.post(
-        '/compute/accounts.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
 
     assert 'OK' in response.status
@@ -199,8 +205,9 @@ def test_compute_with_variable_in_namespace(iris_server, serial):
 
     blob = serial.dumps({'expr': tree, 'namespace': {'pl': 5}})
     resp = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=blob,
+        headers=mimetype(serial)
     )
 
     assert 'OK' in resp.status
@@ -223,8 +230,9 @@ def test_compute_by_with_summary(iris_server, serial):
     tree = to_tree(expr)
     blob = serial.dumps({'expr': tree})
     resp = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=blob,
+        headers=mimetype(serial)
     )
     assert 'OK' in resp.status
     data = serial.loads(resp.data)
@@ -245,8 +253,9 @@ def test_compute_column_wise(iris_server, serial):
     tree = to_tree(expr)
     blob = serial.dumps({'expr': tree})
     resp = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=blob,
+        headers=mimetype(serial)
     )
 
     assert 'OK' in resp.status
@@ -264,8 +273,9 @@ def test_multi_expression_compute(test, serial):
     expr = join(s.accounts, s.cities)
 
     resp = test.post(
-        '/compute.{name}'.format(name=serial.name),
-        data=serial.dumps({'expr': to_tree(expr)}),
+        '/compute',
+        data=serial.dumps(dict(expr=to_tree(expr))),
+        headers=mimetype(serial)
     )
 
     assert 'OK' in resp.status
@@ -281,8 +291,9 @@ def test_multi_expression_compute(test, serial):
 def test_leaf_symbol(test, serial):
     query = {'expr': {'op': 'Field', 'args': [':leaf', 'cities']}}
     resp = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
 
     data = serial.loads(resp.data)
@@ -299,8 +310,9 @@ def test_sqlalchemy_result(test, serial):
     query = {'expr': to_tree(expr)}
 
     response = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
 
     assert 'OK' in response.status
@@ -319,9 +331,11 @@ def test_server_can_compute_sqlalchemy_reductions(test, serial):
     expr = t.db.iris.petal_length.sum()
     query = {'expr': to_tree(expr)}
     response = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
+
     assert 'OK' in response.status
     respdata = serial.loads(response.data)
     result = respdata['data']
@@ -334,9 +348,11 @@ def test_serialization_endpoints(test, serial):
     expr = t.db.iris.petal_length.sum()
     query = {'expr': to_tree(expr)}
     response = test.post(
-        '/compute.{name}'.format(name=serial.name),
+        '/compute',
         data=serial.dumps(query),
+        headers=mimetype(serial)
     )
+
     assert 'OK' in response.status
     respdata = serial.loads(response.data)
     result = respdata['data']
@@ -355,13 +371,20 @@ def has_bokeh():
 @pytest.mark.parametrize('serial', all_formats)
 def test_cors_compute(test, serial, has_bokeh):
     expr = t.db.iris.petal_length.sum()
-    res = test.post('/compute.{name}'.format(name=serial.name),
-                    data=serial.dumps(dict(expr=to_tree(expr))))
+    res = test.post(
+        '/compute',
+        data=serial.dumps(dict(expr=to_tree(expr))),
+        headers=mimetype(serial)
+    )
+
     assert res.status_code == 200
     assert res.headers['Access-Control-Allow-Origin'] == '*'
     assert 'HEAD' in res.headers['Access-Control-Allow-Methods']
     assert 'OPTIONS' in res.headers['Access-Control-Allow-Methods']
-    assert 'GET' in res.headers['Access-Control-Allow-Methods']
+    assert 'POST' in res.headers['Access-Control-Allow-Methods']
+
+    # we don't allow gets because we're always sending data
+    assert 'GET' not in res.headers['Access-Control-Allow-Methods']
 
 
 @pytest.mark.parametrize('method',
@@ -375,4 +398,109 @@ def test_cors_datashape(test, method, has_bokeh):
     assert res.headers['Access-Control-Allow-Origin'] == '*'
     assert 'HEAD' not in res.headers['Access-Control-Allow-Methods']
     assert 'OPTIONS' not in res.headers['Access-Control-Allow-Methods']
+    assert 'POST' not in res.headers['Access-Control-Allow-Methods']
+
+    # we only allow GET requests
     assert 'GET' in res.headers['Access-Control-Allow-Methods']
+
+
+@pytest.fixture(scope='module')
+def username():
+    return 'blaze-dev'
+
+
+@pytest.fixture(scope='module')
+def password():
+    return 'SecretPassword123'
+
+
+@pytest.fixture(scope='module')
+def server_with_auth(username, password):
+    def auth(a):
+        return a and a.username == username and a.password == password
+
+    s = Server(data, all_formats, authorization=auth)
+    s.app.testing = True
+    return s
+
+
+@pytest.yield_fixture
+def test_with_auth(server_with_auth):
+    with server_with_auth.app.test_client() as c:
+        yield c
+
+
+def basic_auth(username, password):
+    return (
+        b'Basic ' + b64encode(':'.join((username, password)).encode('utf-8'))
+    )
+
+
+@pytest.mark.parametrize('serial', all_formats)
+def test_auth(test_with_auth, username, password, serial):
+    expr = t.accounts.amount.sum()
+    query = {'expr': to_tree(expr)}
+
+    r = test_with_auth.get(
+        '/datashape',
+        headers={'authorization': basic_auth(username, password)},
+    )
+    assert r.status_code == 200
+    headers = mimetype(serial)
+    headers['authorization'] = basic_auth(username, password)
+    s = test_with_auth.post(
+        '/compute',
+        data=serial.dumps(query),
+        headers=headers,
+    )
+    assert s.status_code == 200
+
+    u = test_with_auth.get(
+        '/datashape',
+        headers={'authorization': basic_auth(username + 'a', password + 'a')},
+    )
+    assert u.status_code == 401
+
+    headers['authorization'] = basic_auth(username + 'a', password + 'a')
+    v = test_with_auth.post(
+        '/compute',
+        data=serial.dumps(query),
+        headers=headers,
+    )
+    assert v.status_code == 401
+
+
+@pytest.mark.parametrize('serial', all_formats)
+def test_minute_query(test, serial):
+    expr = t.events.when.minute
+    query = {'expr': to_tree(expr)}
+    result = test.post(
+        '/compute',
+        headers=mimetype(serial),
+        data=serial.dumps(query)
+    )
+    expected = {
+        'data': [0, 0],
+        'names': ['when_minute'],
+        'datashape': '2 * int64'
+    }
+    assert result.status_code == 200
+    assert expected == serial.loads(result.data)
+
+
+@pytest.mark.parametrize('serial', all_formats)
+def test_isin(test, serial):
+    expr = t.events.value.isin(frozenset([1]))
+    query = {'expr': to_tree(expr)}
+    result = test.post(
+        '/compute',
+        headers=mimetype(serial),
+        data=serial.dumps(query)
+    )
+    expected = {
+        'data': [True, False],
+        'names': ['value'],
+        'datashape': '2 * bool',
+    }
+    assert result.status_code == 200
+    assert expected == serial.loads(result.data)

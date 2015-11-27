@@ -7,12 +7,11 @@ blocked algorithms.
 ### Make a dask array of ones
 
     >>> import dask.array as da
-    >>> x = da.ones(15, blockshape=(5,))
+    >>> x = da.ones(15, chunks=(5,))
 
 ### And visualize the resulting dask graph
 
-    >>> from dask.dot import dot_graph
-    >>> dot_graph(x.dask)
+    >>> x.visualize('dask.pdf')
 
 ![](images/dask.ones.png)
 
@@ -34,13 +33,6 @@ increasingly complex blocked algorithm task graphs.
 ![](images/dask.ones2.png)
 
 
-### Elementwise operations
-
-    >>> ((x + 1) * 2) ** 3
-
-![](images/dask.ones3.png)
-
-
 ### Reductions
 
     >>> (x + 1).sum()
@@ -58,7 +50,7 @@ increasingly complex blocked algorithm task graphs.
 
 ### Ghosting (shared boundaries)
 
-    >>> x = da.ones(100, blockshape=(10,))
+    >>> x = da.ones(100, chunks=(10,))
     >>> g = da.ghost.ghost(x, depth={0: 2}, boundary={0: np.nan})
 
 ![](images/dask.ghost.png)
@@ -67,7 +59,7 @@ increasingly complex blocked algorithm task graphs.
 
 ### Two Dimensional Algorithms
 
-    >>> x = da.ones((15, 15), blockshape=(5, 5))
+    >>> x = da.ones((15, 15), chunks=(5, 5))
 
 
 ### Partial Reductions
@@ -99,4 +91,3 @@ increasingly complex blocked algorithm task graphs.
 
 We can compound these operations forever.  Constructing larger and larger
 graphs before we hand off the work to a scheduler to execute.
-

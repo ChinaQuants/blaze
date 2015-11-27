@@ -1,0 +1,69 @@
+Release |version|
+-----------------
+
+:Release: |version|
+:Date: TBD
+
+New Expressions
+~~~~~~~~~~~~~~~
+
+* Add a :func:`~blaze.expr.collections.shift` expression for shifting
+  data backwards or forwards by *N* rows (:issue:`1266`).
+
+Improved Expressions
+~~~~~~~~~~~~~~~~~~~~
+
+New Backends
+~~~~~~~~~~~~
+
+Improved Backends
+~~~~~~~~~~~~~~~~~
+
+* Adds support for :func:`~blaze.expr.collections.tail` in the sql backend
+  (:issue:`1289`).
+
+API Changes
+~~~~~~~~~~~
+
+* Removed support for Python 2.6 (:issue:`1267`).
+* Removed support for Python 3.3 (:issue:`1270`).
+* When a CSV file consists of all strings, you must pass
+  ``has_header=True`` when using the ``Data`` constructor (:issue:`1254`).
+* Comparing ``date`` and ``datetime`` datashaped things to the empty
+  string now raises a ``TypeError`` (:issue:`1308`).
+
+Bug Fixes
+~~~~~~~~~
+
+* Fixed a bug where ``Merge`` expressions would unpack option types in their
+  fields. This could cause you to have a table where ``expr::{a: int32}`` but
+  ``expr.a::?int32``. Note that the dotted acces is an option (:issue:`1262`).
+* Explicitly set ``Node.__slots__`` and ``Expr.__slots__`` to ``()``.  This
+  ensures instances of slotted subclasses like ``Join`` do not have a useless
+  empty ``__dict__`` attribute (:issue:`1274` and :issue:`1268`).
+* Fixed a bug that prevented creating a
+  :class:`~blaze.interactive.InteractiveSymbol` that wrapped ``nan`` if the
+  dshape was ``datetime``. This now correctly coerces to `NaT` (:issue:`1272`).
+* Fixed an issue where blaze client/server could not use `isin` expressions
+  because the ``frozenset`` failed to serialize. This also added support for
+  rich serialization over json for things like datetimes (:issue:`1255`).
+* Fixed a bug where ``len`` would fail on an interactive expression whose
+  resources were sqlalchemy objects (:issue:`1273`).
+* Use aliases instead of common table expressions (CTEs) because MySQL doesn't
+  have CTEs (:issue:`1278`).
+* Fixed a bug where we couldn't display an empty string identifier
+  in interactive mode (:issue:`1279`).
+* Fixed a bug where comparisons with optionals that should have resulted in
+  optionals did not (:issue:`1292`).
+* Fixed a bug where ``Join.schema`` would not always be instantiated
+  (:issue:`1288`).
+* Fixed a bug where comparisons to a empty string magically converted
+  the empty string to ``None`` (:issue:`1308`).
+* Fixed a bug where leaves that only appeared in the predicate of a selection
+  would not be in scope in time to compute the predicate. This would cause whole
+  expressions like ``a[a > b]`` to fail because ``b`` was not in scope
+  (:issue:`1275`).
+* Fix a broken test on machines that don't allow postgres to read from the
+  local filesystem (:issue:`1323`).
+* Updated a test to reflect changes from odo
+  `#366 <https://github.com/blaze/odo/issues/366>`_ (:issue:`1323`).

@@ -2,11 +2,14 @@ from __future__ import absolute_import, division, print_function
 
 import os
 import datetime
+import re
 
 try:
     from cytoolz import nth
 except ImportError:
     from toolz import nth
+
+from toolz.curried.operator import setitem
 
 from itertools import islice
 from collections import Iterator
@@ -15,6 +18,7 @@ from multiprocessing.pool import ThreadPool
 # these are used throughout blaze, don't remove them
 from odo.utils import tmpfile, filetext, filetexts, raises, keywords, ignoring
 
+import pandas as pd
 import psutil
 import numpy as np
 
@@ -157,7 +161,80 @@ def listpack(x):
 
 @dispatch(datetime.datetime)
 def json_dumps(dt):
-    s = dt.isoformat()
-    if not dt.tzname():
-        s += 'Z'
-    return s
+    if dt is pd.NaT:
+        # NaT has an isoformat but it is totally invalid.
+        # This keeps the parsing on the client side simple.
+        s = 'NaT'
+    else:
+        s = dt.isoformat()
+        if not dt.tzname():
+            s += 'Z'
+
+    return {'__!datetime': s}
+
+
+@dispatch(frozenset)
+def json_dumps(ds):
+    return {'__!frozenset': list(ds)}
+
+
+@dispatch(datetime.timedelta)
+def json_dumps(ds):
+    return {'__!timedelta': ds.total_seconds()}
+
+
+def object_hook(obj):
+    """Convert a json object dict back into a python object.
+
+    This looks for our objects that have encoded richer representations with
+    a ``__!{type}`` key.
+
+    Parameters
+    ----------
+    obj : dict
+        The raw json parsed dictionary.
+
+    Returns
+    -------
+    parsed : any
+        The richer form of the object.
+
+    Notes
+    -----
+    The types that this reads can be extended with the ``register`` method.
+    For example:
+
+    >>> class MyList(list):
+    ...     pass
+    >>> @object_hook.register('MyList')
+    ... def _parse_my_list(obj):
+    ...     return MyList(obj)
+
+    Register can also be called as a function like:
+    >>> object_hook.register('frozenset', frozenset)
+    """
+    if len(obj) != 1:
+        return obj
+
+    key, = obj.keys()
+    if not key.startswith('__!'):
+        return obj
+
+    return object_hook._converters[key[len('__!'):]](obj[key])
+object_hook._converters = {}
+object_hook.register = setitem(object_hook._converters)
+
+
+object_hook.register('datetime', pd.Timestamp)
+object_hook.register('frozenset', frozenset)
+
+
+@object_hook.register('timedelta')
+def _read_timedelta(ds):
+    return datetime.timedelta(seconds=ds)
+
+
+def normalize(s):
+    s = ' '.join(s.strip().split()).lower()
+    s = re.sub(r'(alias)_?\d*', r'\1', s)
+    return re.sub(r'__([A-Za-z_][A-Za-z_0-9]*)', r'\1', s)

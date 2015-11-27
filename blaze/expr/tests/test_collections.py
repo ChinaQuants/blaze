@@ -1,6 +1,7 @@
 import pytest
 
 from datashape import dshape
+from datashape.util.testing import assert_dshape_equal
 
 from blaze.expr import symbol
 from blaze.expr.collections import merge, join, transform, concat
@@ -18,6 +19,15 @@ def test_merge():
 
     assert set(expr.fields) == set(['name', 'y'])
     assert expr.y.isidentical(e.x.label('y'))
+
+
+def test_merge_options():
+    s = symbol('s', 'var * {a: ?A, b: ?B}')
+
+    merged = merge(a=s.a, b=s.b)
+    assert_dshape_equal(merged.dshape, dshape('var * {a: ?A, b: ?B}'))
+    assert_dshape_equal(merged.a.dshape, dshape('var * ?A'))
+    assert_dshape_equal(merged.b.dshape, dshape('var * ?B'))
 
 
 def test_merge_on_single_argument_is_noop():
@@ -81,6 +91,36 @@ def test_raise_error_if_join_on_no_columns():
     b = symbol('b', 'var * {y: int}')
 
     assert raises(ValueError, lambda: join(a, b))
+
+
+def test_join_option_types():
+    a = symbol('a', 'var * {x: ?int}')
+    b = symbol('b', 'var * {x: int}')
+
+    assert join(a, b, 'x').dshape == dshape('var * {x: int}')
+    assert join(b, a, 'x').dshape == dshape('var * {x: int}')
+
+
+def test_join_mismatched_schema():
+    a = symbol('a', 'var * {x: int}')
+    b = symbol('b', 'var * {x: string}')
+
+    with pytest.raises(TypeError):
+        join(a, b, 'x')
+
+
+def test_join_type_promotion():
+    a = symbol('a', 'var * {x: int32}')
+    b = symbol('b', 'var * {x: int64}')
+
+    assert join(a, b, 'x').dshape == dshape('var * {x: int64}')
+
+
+def test_join_type_promotion_option():
+    a = symbol('a', 'var * {x: ?int32}')
+    b = symbol('b', 'var * {x: int64}')
+
+    assert join(a, b, 'x').dshape == dshape('var * {x: int64}')
 
 
 def test_isin():
@@ -157,3 +197,13 @@ def test_concat_axis_too_great():
 
     with pytest.raises(ValueError):
         concat(a, b, axis=2)
+
+
+def test_shift():
+    t = symbol('t', 'var * float64')
+    assert t.shift(1).dshape == dshape('var * ?float64')
+    assert t.shift(0).dshape == t.dshape
+    assert t.shift(-1).dshape == dshape('var * ?float64')
+    assert repr(t.shift(1)) == 'shift(t, n=1)'
+    assert repr(t.shift(0)) == 'shift(t, n=0)'
+    assert repr(t.shift(-1)) == 'shift(t, n=-1)'

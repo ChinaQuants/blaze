@@ -3,16 +3,19 @@ from __future__ import absolute_import, division, print_function
 from toolz import compose, identity
 from datashape.predicates import isscalar
 
-from ..expr import (Expr, ElemWise, Selection, Sort, Apply, Distinct, Join,
-                    By, Label, Summary, by, ReLabel, Like, Reduction, Head)
-from .python import (compute, rrowfunc, rowfunc, ElemWise, pair_assemble,
+from ..expr import (
+    Expr, ElemWise, SimpleSelection, Sort, Apply, Distinct, Join, By, Label,
+    Summary, by, ReLabel, Like, Reduction, Head
+)
+from .python import (compute, rrowfunc, rowfunc, pair_assemble,
                      reduce_by_funcs, binops, like_regex_predicate)
 from ..expr.broadcast import broadcast_collect
+from ..expr.optimize import simple_selections
 from ..compatibility import builtins, unicode
 from ..expr import reductions
 from ..dispatch import dispatch
 
-from .core import compute, compute_up
+from .core import compute_up
 
 import py4j
 from pyspark import SparkContext
@@ -34,7 +37,7 @@ except:
 
 @dispatch(Expr, RDD)
 def optimize(expr, seq):
-    return broadcast_collect(expr)
+    return simple_selections(broadcast_collect(expr))
 
 
 @dispatch(ElemWise, RDD)
@@ -43,7 +46,7 @@ def compute_up(t, rdd, **kwargs):
     return rdd.map(func)
 
 
-@dispatch(Selection, RDD)
+@dispatch(SimpleSelection, RDD)
 def compute_up(t, rdd, **kwargs):
     predicate = optimize(t.predicate, rdd)
     predicate = rrowfunc(predicate, t._child)
@@ -58,7 +61,8 @@ rdd_reductions = {
     reductions.mean: RDD.mean,
     reductions.var: RDD.variance,
     reductions.std: RDD.stdev,
-    reductions.nunique: compose(RDD.count, RDD.distinct)}
+    reductions.nunique: compose(RDD.count, RDD.distinct)
+}
 
 
 @dispatch(tuple(rdd_reductions), RDD)
@@ -110,6 +114,10 @@ def compute_up(t, rdd, **kwargs):
 
 @dispatch(Distinct, RDD)
 def compute_up(t, rdd, **kwargs):
+    if t.on:
+        raise NotImplementedError(
+            'spark backend cannot specify what columns to distinct on'
+        )
     return rdd.distinct()
 
 

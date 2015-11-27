@@ -16,6 +16,43 @@ __all__ = ['Node', 'path', 'common_subexpression', 'eval_str']
 
 base = (numbers.Number,) + _strtypes
 
+
+def isidentical(a, b):
+    """ Strict equality testing
+
+    Different from x == y -> Eq(x, y)
+
+    >>> isidentical(1, 1)
+    True
+
+    >>> from blaze.expr import symbol
+    >>> x = symbol('x', 'int')
+    >>> isidentical(x, 1)
+    False
+
+    >>> isidentical(x + 1, x + 1)
+    True
+
+    >>> isidentical(x + 1, x + 2)
+    False
+
+    >>> isidentical((x, x + 1), (x, x + 1))
+    True
+
+    >>> isidentical((x, x + 1), (x, x + 2))
+    False
+    """
+    if isinstance(a, base) and isinstance(b, base):
+        return a == b
+    if type(a) != type(b):
+        return False
+    if isinstance(a, Node):
+        return all(map(isidentical, a._args, b._args))
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(map(isidentical, a, b))
+    return a == b
+
+
 class Node(object):
     """ Node in a tree
 
@@ -29,6 +66,7 @@ class Node(object):
 
     blaze.expr.expressions.Expr
     """
+    __slots__ = ()
     __inputs__ = '_child',
 
     def __init__(self, *args, **kwargs):
@@ -42,11 +80,11 @@ class Node(object):
 
     @property
     def _args(self):
-        return tuple([getattr(self, slot) for slot in self.__slots__[1:]])
+        return tuple(getattr(self, slot) for slot in self.__slots__[1:])
 
     @property
     def _inputs(self):
-        return tuple([getattr(self, i) for i in self.__inputs__])
+        return tuple(getattr(self, i) for i in self.__inputs__)
 
     def _leaves(self):
         """ Leaves of an expression tree
@@ -72,8 +110,7 @@ class Node(object):
             return list(unique(concat(i._leaves() for i in self._inputs if
                                       isinstance(i, Node))))
 
-    def isidentical(self, other):
-        return isidentical(self, other)
+    isidentical = isidentical
 
     def __hash__(self):
         try:
@@ -221,42 +258,6 @@ class Node(object):
         return abs(self)
 
 
-def isidentical(a, b):
-    """ Strict equality testing
-
-    Different from x == y -> Eq(x, y)
-
-    >>> isidentical(1, 1)
-    True
-
-    >>> from blaze.expr import symbol
-    >>> x = symbol('x', 'int')
-    >>> isidentical(x, 1)
-    False
-
-    >>> isidentical(x + 1, x + 1)
-    True
-
-    >>> isidentical(x + 1, x + 2)
-    False
-
-    >>> isidentical((x, x + 1), (x, x + 1))
-    True
-
-    >>> isidentical((x, x + 1), (x, x + 2))
-    False
-    """
-    if isinstance(a, base) and isinstance(b, base):
-        return a == b
-    if type(a) != type(b):
-        return False
-    if isinstance(a, Node):
-        return all(map(isidentical, a._args, b._args))
-    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        return len(a) == len(b) and all(map(isidentical, a, b))
-    return a == b
-
-
 def get_callable_name(o):
     """Welcome to str inception. Leave your kittens at home.
     """
@@ -290,6 +291,9 @@ def _str(s):
         return get_callable_name(s)
     elif isinstance(s, Node):
         return str(s)
+    elif isinstance(s, (list, tuple)):
+        body = ", ".join(_str(x) for x in s)
+        return "({0})".format(body if len(s) > 1 else (body + ","))
     else:
         stream = StringIO()
         pprint(s, stream=stream)

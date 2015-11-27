@@ -3,26 +3,34 @@ from __future__ import absolute_import, division, print_function
 import pytest
 
 from datetime import datetime, timedelta
+
+import numpy as np
+
 import pandas as pd
 import pandas.util.testing as tm
-import numpy as np
 from pandas import DataFrame, Series
+
 from string import ascii_lowercase
 
 from blaze.compute.core import compute
 from blaze import dshape, discover, transform
-from blaze.expr import symbol, join, by, summary, Distinct, shape
+from blaze.expr import symbol, join, by, summary, distinct, shape
 from blaze.expr import (merge, exp, mean, count, nunique, sum, min, max, any,
                         var, std, concat)
 from blaze.compatibility import builtins, xfail, assert_series_equal
 
 
 t = symbol('t', 'var * {name: string, amount: int, id: int}')
+nt = symbol('t', 'var * {name: ?string, amount: float64, id: int}')
 
 
 df = DataFrame([['Alice', 100, 1],
                 ['Bob', 200, 2],
                 ['Alice', 50, 3]], columns=['name', 'amount', 'id'])
+
+ndf = DataFrame([['Alice', 100.0, 1],
+                 ['Bob', np.nan, 2],
+                 [np.nan, 50.0, 3]], columns=['name', 'amount', 'id'])
 
 
 tbig = symbol('tbig',
@@ -125,8 +133,10 @@ def test_multi_column_join():
 def test_unary_op():
     assert (compute(exp(t['amount']), df) == np.exp(df['amount'])).all()
 
+
 def test_abs():
     assert (compute(abs(t['amount']), df) == abs(df['amount'])).all()
+
 
 def test_neg():
     assert_series_equal(compute(-t['amount'], df),
@@ -185,11 +195,31 @@ def test_distinct():
                           ['Drew', 'M', 200, 5],
                           ['Drew', 'M', 200, 5]],
                          columns=['name', 'sex', 'amount', 'id'])
-    d_t = Distinct(tbig)
+    d_t = distinct(tbig)
     d_df = compute(d_t, dftoobig)
     tm.assert_frame_equal(d_df, dfbig)
     # Test idempotence
     tm.assert_frame_equal(compute(d_t, d_df), d_df)
+
+
+def test_distinct_on():
+    cols = ['name', 'sex', 'amount', 'id']
+    df = DataFrame([['Alice', 'F', 100, 1],
+                    ['Alice', 'F', 100, 3],
+                    ['Drew', 'F', 100, 4],
+                    ['Drew', 'M', 100, 5],
+                    ['Drew', 'F', 100, 4],
+                    ['Drew', 'M', 100, 5],
+                    ['Drew', 'M', 200, 5]],
+                   columns=cols)
+    s = symbol('s', discover(df))
+    computed = compute(s.distinct('sex'), df)
+    tm.assert_frame_equal(
+        computed,
+        pd.DataFrame([['Alice', 'F', 100, 1],
+                      ['Drew', 'M', 100, 5]],
+                     columns=cols),
+    )
 
 
 def test_by_one():
@@ -283,6 +313,20 @@ def test_join_suffixes():
     tm.assert_frame_equal(result, expected)
 
 
+def test_join_promotion():
+    a_data = pd.DataFrame([[0.0, 1.5], [1.0, 2.5]], columns=list('ab'))
+    b_data = pd.DataFrame([[0, 1], [1, 2]], columns=list('ac'))
+    a = symbol('a', discover(a_data))
+    b = symbol('b', discover(b_data))
+
+    joined = join(a, b, 'a')
+    assert joined.dshape == dshape('var * {a: float64, b: float64, c: int64}')
+
+    expected = pd.merge(a_data, b_data, on='a')
+    result = compute(joined, {a: a_data, b: b_data})
+    tm.assert_frame_equal(result, expected)
+
+
 def test_sort():
     tm.assert_frame_equal(compute(t.sort('amount'), df),
                           df.sort('amount'))
@@ -299,15 +343,13 @@ def test_sort_on_series_no_warning(recwarn):
 
     recwarn.clear()
 
-    assert_series_equal(compute(t['amount'].sort('amount'), df),
-                           expected)
+    assert_series_equal(compute(t['amount'].sort('amount'), df), expected)
 
     # raises as assertion error if no warning occurs, same thing for below
     with pytest.raises(AssertionError):
         assert recwarn.pop(FutureWarning)
 
-    assert_series_equal(compute(t['amount'].sort(), df),
-                           expected)
+    assert_series_equal(compute(t['amount'].sort(), df), expected)
     with pytest.raises(AssertionError):
         assert recwarn.pop(FutureWarning)
 
@@ -320,6 +362,10 @@ def test_field_on_series():
 
 def test_head():
     tm.assert_frame_equal(compute(t.head(1), df), df.head(1))
+
+
+def test_tail():
+    tm.assert_frame_equal(compute(t.tail(1), df), df.tail(1))
 
 
 def test_label():
@@ -477,7 +523,6 @@ def test_summary_by():
     expected = DataFrame([['Alice', 2, 152],
                           ['Bob', 1, 201]], columns=['name', 'count', 'sum'])
     tm.assert_frame_equal(result, expected)
-
 
 @pytest.mark.xfail(raises=TypeError,
                    reason=('pandas backend cannot support non Reduction '
@@ -674,6 +719,14 @@ def test_by_with_complex_summary():
     assert list(result.total) == [150 + 4 - 1, 200 + 2 - 1]
 
 
+def test_notnull():
+    assert (compute(nt.name.notnull(), ndf) == ndf.name.notnull()).all()
+
+
+def test_isnan():
+    assert (compute(nt.amount.isnan(), ndf) == ndf.amount.isnull()).all()
+
+
 @pytest.mark.parametrize('keys', [[1], [2, 3]])
 def test_isin(keys):
     expr = t[t.id.isin(keys)]
@@ -755,3 +808,35 @@ def test_count_keepdims_frame():
     s = symbol('s', discover(df))
     assert_series_equal(compute(s.count(keepdims=True), df),
                         pd.Series([df.shape[0]], name='s_count'))
+
+
+def test_time_field():
+    data = pd.Series(pd.date_range(start='20120101', end='20120102', freq='H'))
+    s = symbol('s', discover(data))
+    result = compute(s.time, data)
+    expected = data.dt.time
+    expected.name = 's_time'
+    assert_series_equal(result, expected)
+
+
+
+@pytest.mark.parametrize('n', [-1, 0, 1])
+def test_shift(n):
+    data = pd.Series(pd.date_range(start='20120101', end='20120102', freq='H'))
+    s = symbol('s', discover(data))
+    result = compute(s.shift(n), data)
+    expected = data.shift(n)
+    assert_series_equal(result, expected)
+
+
+def test_selection_inner_inputs():
+    s_data = pd.DataFrame({'a': np.arange(5)})
+    t_data = pd.DataFrame({'a': np.arange(5)})
+
+    s = symbol('s', 'var * {a: int64}')
+    t = symbol('t', 'var * {a: int64}')
+
+    tm.assert_frame_equal(
+        compute(s[s.a == t.a], {s: s_data, t: t_data}),
+        s_data
+    )

@@ -4,11 +4,16 @@ import pytest
 
 import numpy as np
 import pandas as pd
+
 from datetime import datetime, date
+
+import numba
 
 from blaze.compute.core import compute, compute_up
 from blaze.expr import symbol, by, exp, summary, Broadcast, join, concat
+from blaze.expr import greatest, least
 from blaze import sin
+import blaze
 from odo import into
 from datashape import discover, to_numpy, dshape
 
@@ -104,7 +109,7 @@ def test_count_nan():
     assert compute(t.count(), x) == 2
 
 
-def test_Distinct():
+def test_distinct():
     x = np.array([('Alice', 100),
                   ('Alice', -200),
                   ('Bob', 100),
@@ -117,6 +122,62 @@ def test_Distinct():
               np.unique(x['name']))
     assert eq(compute(t.distinct(), x),
               np.unique(x))
+
+
+def test_distinct_on_recarray():
+    rec = pd.DataFrame(
+        [[0, 1],
+         [0, 2],
+         [1, 1],
+         [1, 2]],
+        columns=('a', 'b'),
+    ).to_records(index=False)
+
+    s = symbol('s', discover(rec))
+    assert (
+        compute(s.distinct('a'), rec) ==
+        pd.DataFrame(
+            [[0, 1],
+             [1, 1]],
+            columns=('a', 'b'),
+        ).to_records(index=False)
+    ).all()
+
+
+def test_distinct_on_structured_array():
+    arr = np.array(
+        [(0., 1.),
+         (0., 2.),
+         (1., 1.),
+         (1., 2.)],
+        dtype=[('a', 'f4'), ('b', 'f4')],
+    )
+
+    s = symbol('s', discover(arr))
+    assert(
+        compute(s.distinct('a'), arr) ==
+        np.array([(0., 1.), (1., 1.)], dtype=arr.dtype)
+    ).all()
+
+
+def test_distinct_on_str():
+    rec = pd.DataFrame(
+        [['a', 'a'],
+         ['a', 'b'],
+         ['b', 'a'],
+         ['b', 'b']],
+        columns=('a', 'b'),
+    ).to_records(index=False).astype([('a', '<U1'), ('b', '<U1')])
+
+    s = symbol('s', discover(rec))
+    assert (
+        compute(s.distinct('a'), rec) ==
+        pd.DataFrame(
+            [['a', 'a'],
+             ['b', 'a']],
+            columns=('a', 'b'),
+        ).to_records(index=False).astype([('a', '<U1'), ('b', '<U1')])
+    ).all()
 
 
 def test_sort():
@@ -136,6 +197,11 @@ def test_sort():
 def test_head():
     assert eq(compute(t.head(2), x),
               x[:2])
+
+
+def test_tail():
+    assert eq(compute(t.tail(2), x),
+              x[-2:])
 
 
 def test_label():
@@ -352,7 +418,7 @@ def test_mixed_types():
                  dtype=[('count', '<i4'), ('total', '<i8')])
     aggregate = symbol('aggregate', discover(x))
     result = compute(aggregate.total.sum(axis=(0,)) /
-                     aggregate.count.sum(axis=(0,)), x)
+                     aggregate['count'].sum(axis=(0,)), x)
     expected = (x['total'].sum(axis=0, keepdims=True) /
                 x['count'].sum(axis=0, keepdims=True)).squeeze()
     np.testing.assert_array_equal(result, expected)
@@ -496,4 +562,85 @@ def test_concat_mat():
     assert (
         compute(concat(s, t, axis=1), {s: s_data, t: t_data}) ==
         np.concatenate((s_data, t_data), axis=1)
+    ).all()
+
+
+@pytest.mark.parametrize('dtype', ['int64', 'float64'])
+def test_least(dtype):
+    s_data = np.arange(15, dtype=dtype).reshape(5, 3)
+    t_data = np.arange(15, 30, dtype=dtype).reshape(5, 3)
+    s = symbol('s', discover(s_data))
+    t = symbol('t', discover(t_data))
+    expr = least(s, t)
+    result = compute(expr, {s: s_data, t: t_data})
+    expected = np.minimum(s_data, t_data)
+    assert np.all(result == expected)
+
+
+@pytest.mark.parametrize('dtype', ['int64', 'float64'])
+def test_least_mixed(dtype):
+    s_data = np.array([2, 1], dtype=dtype)
+    t_data = np.array([1, 2], dtype=dtype)
+    s = symbol('s', discover(s_data))
+    t = symbol('t', discover(t_data))
+    expr = least(s, t)
+    result = compute(expr, {s: s_data, t: t_data})
+    expected = np.minimum(s_data, t_data)
+    assert np.all(result == expected)
+
+
+@pytest.mark.parametrize('dtype', ['int64', 'float64'])
+def test_greatest(dtype):
+    s_data = np.arange(15, dtype=dtype).reshape(5, 3)
+    t_data = np.arange(15, 30, dtype=dtype).reshape(5, 3)
+    s = symbol('s', discover(s_data))
+    t = symbol('t', discover(t_data))
+    expr = greatest(s, t)
+    result = compute(expr, {s: s_data, t: t_data})
+    expected = np.maximum(s_data, t_data)
+    assert np.all(result == expected)
+
+
+@pytest.mark.parametrize('dtype', ['int64', 'float64'])
+def test_greatest_mixed(dtype):
+    s_data = np.array([2, 1], dtype=dtype)
+    t_data = np.array([1, 2], dtype=dtype)
+    s = symbol('s', discover(s_data))
+    t = symbol('t', discover(t_data))
+    expr = greatest(s, t)
+    result = compute(expr, {s: s_data, t: t_data})
+    expected = np.maximum(s_data, t_data)
+    assert np.all(result == expected)
+
+
+binary_name_map = {
+    'atan2': 'arctan2'
+}
+
+
+@pytest.mark.parametrize('funcname',
+                         ['atan2', 'copysign', 'hypot', 'ldexp',
+                          pytest.mark.xfail('fmod', raises=numba.TypingError)])
+def test_binary_math(funcname):
+    s_data = np.arange(15).reshape(5, 3)
+    t_data = np.arange(15, 30).reshape(5, 3)
+    s = symbol('s', discover(s_data))
+    t = symbol('t', discover(t_data))
+    scope = {s: s_data, t: t_data}
+    result = compute(getattr(blaze, funcname)(s, t), scope)
+    expected = getattr(np, binary_name_map.get(funcname, funcname))(s_data,
+                                                                    t_data)
+    assert np.all(result == expected)
+
+
+def test_selection_inner_inputs():
+    s_data = np.arange(5).reshape(5, 1)
+    t_data = np.arange(5).reshape(5, 1)
+
+    s = symbol('s', 'var * {a: int64}')
+    t = symbol('t', 'var * {a: int64}')
+
+    assert (
+        compute(s[s.a == t.a], {s: s_data, t: t_data}) ==
+        s_data
     ).all()

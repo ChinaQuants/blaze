@@ -7,12 +7,15 @@ from pandas import DataFrame, Series
 from datashape import to_numpy, to_numpy_dtype
 from numbers import Number
 
-from ..expr import Reduction, Field, Projection, Broadcast, Selection, ndim
-from ..expr import Distinct, Sort, Head, Label, ReLabel, Expr, Slice, Join
-from ..expr import std, var, count, nunique, Summary, IsIn
-from ..expr import BinOp, UnaryOp, USub, Not, nelements, Repeat, Concat, Interp
-from ..expr import UTCFromTimestamp, DateTimeTruncate
-from ..expr import Transpose, TensorDot, Coerce
+from ..expr import (
+    Reduction, Field, Projection, Broadcast, Selection, ndim,
+    Distinct, Sort, Tail, Head, Label, ReLabel, Expr, Slice, Join,
+    std, var, count, nunique, Summary, IsIn,
+    BinOp, UnaryOp, USub, Not, nelements, Repeat, Concat, Interp,
+    UTCFromTimestamp, DateTimeTruncate,
+    Transpose, TensorDot, Coerce, isnan,
+    greatest, least
+)
 from ..utils import keywords
 
 from .core import base, compute
@@ -94,6 +97,17 @@ def compute_up_np_interp(t, lhs, rhs, **kwargs):
     return _interp(lhs, rhs)
 
 
+@compute_up.register(greatest, np.ndarray, (np.ndarray, base))
+@compute_up.register(greatest, base, np.ndarray)
+def compute_up_greatest(expr, lhs, rhs, **kwargs):
+    return np.maximum(lhs, rhs)
+
+
+@compute_up.register(least, np.ndarray, (np.ndarray, base))
+@compute_up.register(least, base, np.ndarray)
+def compute_up_least(expr, lhs, rhs, **kwargs):
+    return np.minimum(lhs, rhs)
+
 
 @dispatch(BinOp, np.ndarray, (np.ndarray, base))
 def compute_up(t, lhs, rhs, **kwargs):
@@ -120,12 +134,12 @@ def compute_up(t, x, **kwargs):
 
 @dispatch(Not, np.ndarray)
 def compute_up(t, x, **kwargs):
-    return ~x
+    return np.logical_not(x)
 
 
 @dispatch(USub, np.ndarray)
 def compute_up(t, x, **kwargs):
-    return -x
+    return np.negative(x)
 
 
 inat = np.datetime64('NaT').view('int64')
@@ -197,9 +211,21 @@ def compute_up(t, x, **kwargs):
             keepdims=t.keepdims)
 
 
+@compute_up.register(Distinct, np.recarray)
+def recarray_distinct(t, rec, **kwargs):
+    return pd.DataFrame.from_records(rec).drop_duplicates(
+        subset=t.on or None).to_records(index=False).astype(rec.dtype)
+
+
 @dispatch(Distinct, np.ndarray)
-def compute_up(t, x, **kwargs):
-    return np.unique(x)
+def compute_up(t, arr, _recarray_distinct=recarray_distinct, **kwargs):
+    if t.on:
+        if getattr(arr.dtype, 'names', None) is not None:
+            return _recarray_distinct(t, arr, **kwargs).view(np.ndarray)
+        else:
+            raise ValueError('malformed expression: no columns to distinct on')
+
+    return np.unique(arr)
 
 
 @dispatch(Sort, np.ndarray)
@@ -223,6 +249,11 @@ def compute_up(t, x, **kwargs):
     return x[:t.n]
 
 
+@dispatch(Tail, np.ndarray)
+def compute_up(t, x, **kwargs):
+    return x[-t.n:]
+
+
 @dispatch(Label, np.ndarray)
 def compute_up(t, x, **kwargs):
     return np.array(x, dtype=[(t.label, x.dtype.type)])
@@ -237,6 +268,11 @@ def compute_up(t, x, **kwargs):
 @dispatch(Selection, np.ndarray)
 def compute_up(sel, x, **kwargs):
     return x[compute(sel.predicate, {sel._child: x})]
+
+
+@dispatch(Selection, np.ndarray, np.ndarray)
+def compute_up(expr, arr, predicate, **kwargs):
+    return arr[predicate]
 
 
 @dispatch(UTCFromTimestamp, np.ndarray)
@@ -316,6 +352,11 @@ def compute_up(expr, data, **kwargs):
                     - offset)
                     .astype(np_dtype))
     return result
+
+
+@dispatch(isnan, np.ndarray)
+def compute_up(expr, data, **kwargs):
+    return np.isnan(data)
 
 
 @dispatch(np.ndarray)

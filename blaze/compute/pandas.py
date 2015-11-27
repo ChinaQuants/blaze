@@ -41,12 +41,13 @@ from ..dispatch import dispatch
 
 from .core import compute, compute_up, base
 
-from ..expr import (Projection, Field, Sort, Head, Broadcast, Selection,
+from ..expr import (Projection, Field, Sort, Head, Tail, Broadcast, Selection,
                     Reduction, Distinct, Join, By, Summary, Label, ReLabel,
                     Map, Apply, Merge, std, var, Like, Slice, summary,
                     ElemWise, DateTime, Millisecond, Expr, Symbol, IsIn,
                     UTCFromTimestamp, nelements, DateTimeTruncate, count,
-                    UnaryStringFunction, nunique, Coerce, Concat)
+                    UnaryStringFunction, nunique, Coerce, Concat,
+                    isnan, notnull, Shift)
 from ..expr import UnaryOp, BinOp, Interp
 from ..expr import symbol, common_subexpression
 
@@ -130,8 +131,17 @@ def compute_up(t, df, **kwargs):
 
 
 @dispatch(Selection, (Series, DataFrame))
-def compute_up(t, df, **kwargs):
-    predicate = compute(t.predicate, {t._child: df})
+def compute_up(expr, df, **kwargs):
+    return compute_up(
+        expr,
+        df,
+        compute(expr.predicate, {expr._child: df}),
+        **kwargs
+    )
+
+
+@dispatch(Selection, (Series, DataFrame), Series)
+def compute_up(expr, df, predicate, **kwargs):
     return df[predicate]
 
 
@@ -154,6 +164,16 @@ def compute_up(t, lhs, rhs, **kwargs):
         suffixes=t.suffixes,
     )
     return result.reset_index()[t.fields]
+
+
+@dispatch(isnan, pd.Series)
+def compute_up(expr, data, **kwargs):
+    return data.isnull()
+
+
+@dispatch(notnull, pd.Series)
+def compute_up(expr, data, **kwargs):
+    return data.notnull()
 
 
 pandas_structure = DataFrame, Series, DataFrameGroupBy, SeriesGroupBy
@@ -192,9 +212,16 @@ def compute_up(t, s, **kwargs):
     return result
 
 
-@dispatch(Distinct, (DataFrame, Series))
+@dispatch(Distinct, DataFrame)
 def compute_up(t, df, **kwargs):
-    return df.drop_duplicates().reset_index(drop=True)
+    return df.drop_duplicates(subset=t.on or None).reset_index(drop=True)
+
+
+@dispatch(Distinct, Series)
+def compute_up(t, s, **kwargs):
+    if t.on:
+        raise ValueError('malformed expression: no columns to distinct on')
+    return s.drop_duplicates().reset_index(drop=True)
 
 
 @dispatch(nunique, DataFrame)
@@ -336,10 +363,14 @@ def fancify_summary(expr):
 def compute_by(t, s, g, df):
     one, two, three = fancify_summary(s)  # see above
     names = one.fields
-    preapply = DataFrame(dict(zip(names,
-                                  [compute(v._child, {t._child: df})
-                                   for v in one.values])))
+    preapply = DataFrame(
+        dict(
+            zip(names, [compute(v._child, {t._child: df}) for v in one.values])
+        )
+    )
 
+    if not df.index.equals(preapply.index):
+        df = df.loc[preapply.index]
     df2 = concat_nodup(df, preapply)
 
     groups = df2.groupby(g)
@@ -354,7 +385,9 @@ def compute_by(t, s, g, df):
     result2 = pd.concat(cols, axis=1)
 
     # Rearrange columns to match names order
-    result3 = result2[sorted(result2.columns, key=lambda t: s.fields.index(t))]
+    result3 = result2[
+        sorted(result2.columns, key=lambda t, s=s: s.fields.index(t))
+    ]
     return result3
 
 
@@ -433,12 +466,20 @@ def compute_up(t, df, **kwargs):
 
 @dispatch(Sort, Series)
 def compute_up(t, s, **kwargs):
-    return s.order(ascending=t.ascending)
+    try:
+        return s.sort_values(ascending=t.ascending)
+    except AttributeError:
+        return s.order(ascending=t.ascending)
 
 
 @dispatch(Head, (Series, DataFrame))
 def compute_up(t, df, **kwargs):
     return df.head(t.n)
+
+
+@dispatch(Tail, (Series, DataFrame))
+def compute_up(t, df, **kwargs):
+    return df.tail(t.n)
 
 
 @dispatch(Label, DataFrame)
@@ -573,20 +614,6 @@ def compute_up(expr, df, **kwargs):
     return df.shape[0]
 
 
-units_map = {
-    'year': 'Y',
-    'month': 'M',
-    'week': 'W',
-    'day': 'D',
-    'hour': 'h',
-    'minute': 'm',
-    'second': 's',
-    'millisecond': 'ms',
-    'microsecond': 'us',
-    'nanosecond': 'ns'
-}
-
-
 @dispatch(DateTimeTruncate, Series)
 def compute_up(expr, data, **kwargs):
     return Series(compute_up(expr, into(np.ndarray, data), **kwargs),
@@ -601,3 +628,8 @@ def compute_up(expr, data, **kwargs):
 @dispatch(Coerce, Series)
 def compute_up(expr, data, **kwargs):
     return data.astype(to_numpy_dtype(expr.schema))
+
+
+@dispatch(Shift, Series)
+def compute_up(expr, data, **kwargs):
+    return data.shift(expr.n)

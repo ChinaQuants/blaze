@@ -11,8 +11,7 @@ from blaze.expr import (ElemWise, symbol, Reduction, Transpose, TensorDot,
                         Expr, Slice, Broadcast)
 from blaze.expr.split import split
 
-from dask.array.core import (_concatenate2, Array, atop, names, transpose,
-                             tensordot)
+from dask.array.core import _concatenate2, Array, atop, transpose, tensordot
 
 
 def compute_it(expr, leaves, *data, **kwargs):
@@ -40,8 +39,11 @@ try:
                     *concat((dat, tuple(range(ndim(dat))[::-1])) for dat in data))
 
     def optimize_array(expr, *data):
-        return broadcast_collect(expr, Broadcastable=Broadcastable,
-                                       WantToBroadcast=Broadcastable)
+        return broadcast_collect(
+            expr,
+            broadcastable=Broadcastable,
+            want_to_broadcast=Broadcastable,
+        )
 
     for i in range(5):
         compute_up.register(Broadcast, *([(Array, Number)] * i))(compute_broadcast)

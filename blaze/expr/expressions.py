@@ -1,30 +1,50 @@
 from __future__ import absolute_import, division, print_function
 
-import toolz
-import datashape
+from keyword import iskeyword
 import re
 
-from keyword import iskeyword
-
+import datashape
+from datashape import dshape, DataShape, Record, Var, Mono, Fixed
+from datashape.predicates import isscalar, iscollection, isboolean, isrecord
 import numpy as np
-
+from odo.utils import copydoc
+import toolz
 from toolz import concat, memoize, partial, first
 from toolz.curried import map, filter
 
-from datashape import dshape, DataShape, Record, Var, Mono, Fixed
-from datashape.predicates import isscalar, iscollection, isboolean, isrecord
-
-from ..compatibility import _strtypes, builtins, boundmethod
+from ..compatibility import _strtypes, builtins, boundmethod, PY2
 from .core import Node, subs, common_subexpression, path
 from .method_dispatch import select_functions
 from ..dispatch import dispatch
 from .utils import hashable_index, replace_slices
 
 
-__all__ = ['Expr', 'ElemWise', 'Field', 'Symbol', 'discover', 'Projection',
-           'projection', 'Selection', 'selection', 'Label', 'label', 'Map',
-           'ReLabel', 'relabel', 'Apply', 'apply', 'Slice', 'shape', 'ndim',
-           'label', 'symbol', 'Coerce', 'coerce']
+__all__ = [
+    'Apply',
+    'Coerce',
+    'ElemWise',
+    'Expr',
+    'Field',
+    'Label',
+    'Map',
+    'Projection',
+    'ReLabel',
+    'Selection',
+    'SimpleSelection',
+    'Slice',
+    'Symbol',
+    'apply',
+    'coerce',
+    'discover',
+    'label',
+    'label',
+    'ndim',
+    'projection',
+    'relabel',
+    'selection',
+    'shape',
+    'symbol',
+]
 
 
 _attr_cache = dict()
@@ -69,7 +89,7 @@ def valid_identifier(s):
     >>> valid_identifier('1a')
     """
     if isinstance(s, _strtypes):
-        if s[0].isdigit():
+        if not s or s[0].isdigit():
             return
         return s.replace(' ', '_').replace('.', '_').replace('-', '_')
     return s
@@ -83,6 +103,9 @@ class Expr(Node):
     contains shared logic and syntax.  It in turn inherits from ``Node`` which
     holds all tree traversal logic
     """
+
+    __slots__ = ()
+
     def _get_field(self, fieldname):
         if not isinstance(self.dshape.measure, Record):
             if fieldname == self._name:
@@ -161,7 +184,7 @@ class Expr(Node):
 
     def __getattr__(self, key):
         if key == '_hash':
-            raise AttributeError()
+            raise AttributeError(key)
         try:
             return _attr_cache[(self, key)]
         except:
@@ -171,22 +194,25 @@ class Expr(Node):
         except AttributeError:
             fields = dict(zip(map(valid_identifier, self.fields),
                               self.fields))
-            if self.fields and key in fields:
+
+            # prefer the method if there's a field with the same name
+            methods = toolz.merge(
+                schema_methods(self.dshape.measure),
+                dshape_methods(self.dshape)
+            )
+            if key in methods:
+                func = methods[key]
+                if func in method_properties:
+                    result = func(self)
+                else:
+                    result = boundmethod(func, self)
+            elif self.fields and key in fields:
                 if isscalar(self.dshape.measure):  # t.foo.foo is t.foo
                     result = self
                 else:
                     result = self[fields[key]]
             else:
-                d = toolz.merge(schema_methods(self.dshape.measure),
-                                dshape_methods(self.dshape))
-                if key in d:
-                    func = d[key]
-                    if func in method_properties:
-                        result = func(self)
-                    else:
-                        result = boundmethod(func, self)
-                else:
-                    raise
+                raise
         _attr_cache[(self, key)] = result
         return result
 
@@ -232,11 +258,6 @@ def _symbol_key(args, kwargs):
     return (name, ds, token)
 
 
-@memoize(cache=_symbol_cache, key=_symbol_key)
-def symbol(name, dshape, token=None):
-    return Symbol(name, dshape, token=token)
-
-
 class Symbol(Expr):
     """
     Symbolic data.  The leaf of a Blaze expression
@@ -266,6 +287,12 @@ class Symbol(Expr):
 
     def _resources(self):
         return dict()
+
+
+@memoize(cache=_symbol_cache, key=_symbol_key)
+@copydoc(Symbol)
+def symbol(name, dshape, token=None):
+    return Symbol(name, dshape, token=token)
 
 
 @dispatch(Symbol, dict)
@@ -370,6 +397,7 @@ class Projection(ElemWise):
                                                                self.fields))
 
 
+@copydoc(Projection)
 def projection(expr, names):
     if not names:
         raise ValueError("Projection with no names")
@@ -380,7 +408,6 @@ def projection(expr, names):
                          "where expression has names %s" %
                          (names, expr.fields))
     return Projection(expr, tuple(names))
-projection.__doc__ = Projection.__doc__
 
 
 def sanitize_index_lists(ind):
@@ -454,6 +481,11 @@ class Selection(Expr):
     >>> deadbeats = accounts[accounts.amount < 0]
     """
     __slots__ = '_hash', '_child', 'predicate'
+    __inputs__ = '_child', 'predicate'
+
+    @property
+    def _name(self):
+        return self._child._name
 
     def __str__(self):
         return "%s[%s]" % (self._child, self.predicate)
@@ -465,6 +497,14 @@ class Selection(Expr):
         return DataShape(*(shape + [self._child.dshape.measure]))
 
 
+class SimpleSelection(Selection):
+    """Internal selection class that does not treat the predicate as an input.
+    """
+    __slots__ = Selection.__slots__
+    __inputs__ = '_child',
+
+
+@copydoc(Selection)
 def selection(table, predicate):
     subexpr = common_subexpression(table, predicate)
 
@@ -483,8 +523,6 @@ def selection(table, predicate):
                         "%s[%s]" % (table, predicate))
 
     return table._subs({subexpr: Selection(subexpr, predicate)})
-
-selection.__doc__ = Selection.__doc__
 
 
 class Label(ElemWise):
@@ -522,13 +560,11 @@ class Label(ElemWise):
         return 'label(%s, %r)' % (self._child, self.label)
 
 
+@copydoc(Label)
 def label(expr, lab):
     if expr._name == lab:
         return expr
     return Label(expr, lab)
-
-
-label.__doc__ = Label.__doc__
 
 
 class ReLabel(ElemWise):
@@ -590,6 +626,7 @@ class ReLabel(ElemWise):
         return '%s.relabel(%s)' % (self._child, rest)
 
 
+@copydoc(ReLabel)
 def relabel(child, labels=None, **kwargs):
     labels = labels or dict()
     labels = toolz.merge(labels, kwargs)
@@ -610,8 +647,6 @@ def relabel(child, labels=None, **kwargs):
         else:
             return child
     return ReLabel(child, labels)
-
-relabel.__doc__ = ReLabel.__doc__
 
 
 class Map(ElemWise):
@@ -668,6 +703,12 @@ class Map(ElemWise):
             return self._child._name
 
 
+if PY2:
+    copydoc(Map, Expr.map.im_func)
+else:
+    copydoc(Map, Expr.map)
+
+
 class Apply(Expr):
     """ Apply an arbitrary Python function onto an expression
 
@@ -705,7 +746,12 @@ class Apply(Expr):
         return dshape(self._dshape)
 
 
-class Coerce(Expr):
+@copydoc(Apply)
+def apply(expr, func, dshape, splittable=False):
+    return Apply(expr, func, datashape.dshape(dshape), splittable)
+
+
+class Coerce(ElemWise):
     """Coerce an expression to a different type.
 
     Examples
@@ -724,18 +770,13 @@ class Coerce(Expr):
     def schema(self):
         return self.to
 
-    @property
-    def dshape(self):
-        return DataShape(*(self._child.shape + (self.schema,)))
-
     def __str__(self):
         return '%s.coerce(to=%r)' % (self._child, str(self.schema))
 
 
-def apply(expr, func, dshape, splittable=False):
-    return Apply(expr, func, datashape.dshape(dshape), splittable)
-
-apply.__doc__ = Apply.__doc__
+@copydoc(Coerce)
+def coerce(expr, to):
+    return Coerce(expr, dshape(to) if isinstance(to, _strtypes) else to)
 
 
 dshape_method_list = list()
@@ -782,13 +823,6 @@ def ndim(expr):
     2
     """
     return len(shape(expr))
-
-
-def coerce(expr, to):
-    return Coerce(expr, dshape(to) if isinstance(to, _strtypes) else to)
-
-
-coerce.__doc__ = Coerce.__doc__
 
 
 dshape_method_list.extend([

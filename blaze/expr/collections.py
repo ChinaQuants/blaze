@@ -1,21 +1,33 @@
 from __future__ import absolute_import, division, print_function
 
-from toolz import (
-    isdistinct, frequencies, concat as tconcat, unique, get, first,
-)
+import numbers
+import numpy as np
+from functools import partial
+from itertools import chain
+
 import datashape
-from datashape import DataShape, Option, Record, Unit, dshape, var, Fixed, Var
+from datashape import (
+    DataShape, Option, Record, Unit, dshape, var, Fixed, Var, promote, object_,
+)
 from datashape.predicates import isscalar, iscollection, isrecord
+from toolz import (
+    isdistinct, frequencies, concat as tconcat, unique, get, first, compose,
+    keymap
+)
+import toolz.curried.operator as op
+from toolz import memoize
+from odo.utils import copydoc
 
 from .core import common_subexpression
-from .expressions import Expr, ElemWise, label
+from .expressions import Expr, ElemWise, label, Field
 from .expressions import dshape_method_list
-from ..compatibility import zip_longest
+from ..compatibility import zip_longest, _strtypes
+from ..utils import listpack
 
 
 __all__ = ['Sort', 'Distinct', 'Head', 'Merge', 'IsIn', 'isin', 'distinct',
            'merge', 'head', 'sort', 'Join', 'join', 'transform', 'Concat',
-           'concat']
+           'concat', 'Tail', 'tail', 'Shift', 'shift']
 
 
 class Sort(Expr):
@@ -86,6 +98,11 @@ class Distinct(Expr):
 
     """ Remove duplicate elements from an expression
 
+    Parameters
+    ----------
+    on : tuple of :class:`~blaze.expr.expressions.Field`
+        The subset of fields or names of fields to be distinct on.
+
     Examples
     --------
     >>> from blaze import symbol
@@ -99,8 +116,24 @@ class Distinct(Expr):
     >>> from blaze.compute.python import compute
     >>> sorted(compute(e, data))
     [('Alice', 100, 1), ('Bob', 200, 2)]
+
+    Use a subset by passing `on`:
+
+    >>> import pandas as pd
+    >>> e = distinct(t, 'name')
+    >>> data = pd.DataFrame([['Alice', 100, 1],
+    ...                      ['Alice', 200, 2],
+    ...                      ['Bob', 100, 1],
+    ...                      ['Bob', 200, 2]],
+    ...                     columns=['name', 'amount', 'id'])
+    >>> compute(e, data)
+        name  amount  id
+    0  Alice     100   1
+    1    Bob     100   1
+
+
     """
-    __slots__ = '_hash', '_child',
+    __slots__ = '_hash', '_child', 'on'
 
     @property
     def dshape(self):
@@ -115,27 +148,33 @@ class Distinct(Expr):
         return self._child._name
 
     def __str__(self):
-        return 'distinct(%s)' % self._child
+        return 'distinct({child}{on})'.format(
+            child=self._child,
+            on=(', ' if self.on else '') + ', '.join(map(str, self.on))
+        )
 
 
-def distinct(expr):
-    return Distinct(expr)
+@copydoc(Distinct)
+def distinct(expr, *on):
+    fields = frozenset(expr.fields)
+    _on = []
+    append = _on.append
+    for n in on:
+        if isinstance(n, Field):
+            if n._child.isidentical(expr):
+                n = n._name
+            else:
+                raise ValueError('{0} is not a field of {1}'.format(n, expr))
+        if not isinstance(n, _strtypes):
+            raise TypeError('on must be a name or field, not: {0}'.format(n))
+        elif n not in fields:
+            raise ValueError('{0} is not a field of {1}'.format(n, expr))
+        append(n)
+
+    return Distinct(expr, tuple(_on))
 
 
-distinct.__doc__ = Distinct.__doc__
-
-
-class Head(Expr):
-
-    """ First `n` elements of collection
-
-    Examples
-    --------
-    >>> from blaze import symbol
-    >>> accounts = symbol('accounts', 'var * {name: string, amount: int}')
-    >>> accounts.head(5).dshape
-    dshape("5 * {name: string, amount: int32}")
-    """
+class _HeadOrTail(Expr):
     __slots__ = '_hash', '_child', 'n'
 
     @property
@@ -150,36 +189,54 @@ class Head(Expr):
         return self._child._name
 
     def __str__(self):
-        return '%s.head(%d)' % (self._child, self.n)
+        return '%s.%s(%d)' % (self._child, type(self).__name__.lower(), self.n)
 
 
+class Head(_HeadOrTail):
+
+    """ First `n` elements of collection
+
+    Examples
+    --------
+    >>> from blaze import symbol
+    >>> accounts = symbol('accounts', 'var * {name: string, amount: int}')
+    >>> accounts.head(5).dshape
+    dshape("5 * {name: string, amount: int32}")
+
+    See Also
+    --------
+
+    blaze.expr.collections.Tail
+    """
+    pass
+
+
+@copydoc(Head)
 def head(child, n=10):
     return Head(child, n)
 
-head.__doc__ = Head.__doc__
+
+class Tail(_HeadOrTail):
+    """ Last `n` elements of collection
+
+    Examples
+    --------
+    >>> from blaze import symbol
+    >>> accounts = symbol('accounts', 'var * {name: string, amount: int}')
+    >>> accounts.tail(5).dshape
+    dshape("5 * {name: string, amount: int32}")
+
+    See Also
+    --------
+
+    blaze.expr.collections.Head
+    """
+    pass
 
 
-def merge(*exprs, **kwargs):
-    if len(exprs) + len(kwargs) == 1:
-        if exprs:
-            return exprs[0]
-        if kwargs:
-            [(k, v)] = kwargs.items()
-            return v.label(k)
-    # Get common sub expression
-    exprs += tuple(label(v, k) for k, v in sorted(kwargs.items(), key=first))
-    try:
-        child = common_subexpression(*exprs)
-    except Exception:
-        raise ValueError("No common subexpression found for input expressions")
-
-    result = Merge(child, exprs)
-
-    if not isdistinct(result.fields):
-        raise ValueError("Repeated columns found: " + ', '.join(k for k, v in
-                                                                frequencies(result.fields).items() if v > 1))
-
-    return result
+@copydoc(Tail)
+def tail(child, n=10):
+    return Tail(child, n)
 
 
 def transform(t, replace=True, **kwargs):
@@ -202,21 +259,17 @@ def schema_concat(exprs):
 
     In the case of Units, the name is taken from expr.name
     """
-    names, values = [], []
+    new_fields = []
     for c in exprs:
         schema = c.schema[0]
-        if isinstance(schema, Option):
-            schema = schema.ty
         if isinstance(schema, Record):
-            names.extend(schema.names)
-            values.extend(schema.types)
-        elif isinstance(schema, Unit):
-            names.append(c._name)
-            values.append(schema)
+            new_fields.extend(schema.fields)
+        elif isinstance(schema, (Unit, Option)):
+            new_fields.append((c._name, schema))
         else:
             raise TypeError("All schemas must have Record or Unit shape."
-                            "\nGot %s" % c.schema[0])
-    return dshape(Record(list(zip(names, values))))
+                            "\nGot %s" % schema)
+    return dshape(Record(new_fields))
 
 
 class Merge(ElemWise):
@@ -263,7 +316,31 @@ class Merge(ElemWise):
         return list(unique(tconcat(i._leaves() for i in self.children)))
 
 
-merge.__doc__ = Merge.__doc__
+@copydoc(Merge)
+def merge(*exprs, **kwargs):
+    if len(exprs) + len(kwargs) == 1:
+        if exprs:
+            return exprs[0]
+        if kwargs:
+            [(k, v)] = kwargs.items()
+            return v.label(k)
+    # Get common sub expression
+    exprs += tuple(label(v, k) for k, v in sorted(kwargs.items(), key=first))
+    try:
+        child = common_subexpression(*exprs)
+    except Exception:
+        raise ValueError("No common subexpression found for input expressions")
+
+    result = Merge(child, exprs)
+
+    if not isdistinct(result.fields):
+        raise ValueError(
+            "Repeated columns found: " + ', '.join(
+                k for k, v in frequencies(result.fields).items() if v > 1
+            ),
+        )
+
+    return result
 
 
 def unpack(l):
@@ -288,9 +365,17 @@ class Join(Expr):
     ----------
     lhs, rhs : Expr
         Expressions to join
-    on_left : string
-    on_right : string
-    suffixes: pair of strings
+    on_left : str, optional
+        The fields from the left side to join on.
+        If no ``on_right`` is passed, then these are the fields for both
+        sides.
+    on_right : str, optional
+        The fields from the right side to join on.
+    how : {'inner', 'outer', 'left', 'right'}
+        What type of join to perform.
+    suffixes: pair of str
+        The suffixes to be applied to the left and right sides
+        in order to resolve duplicate field names.
 
     Examples
     --------
@@ -313,25 +398,26 @@ class Join(Expr):
     blaze.expr.collections.Merge
     """
     __slots__ = (
-        '_hash', 'lhs', 'rhs', '_on_left', '_on_right', 'how', 'suffixes',
+        '_hash', 'lhs', 'rhs', '_on_left', '_on_right', 'how', 'suffixes'
     )
     __inputs__ = 'lhs', 'rhs'
 
     @property
     def on_left(self):
-        if isinstance(self._on_left, tuple):
-            return list(self._on_left)
-        else:
-            return self._on_left
+        on_left = self._on_left
+        if isinstance(on_left, tuple):
+            return list(on_left)
+        return on_left
 
     @property
     def on_right(self):
-        if isinstance(self._on_right, tuple):
-            return list(self._on_right)
-        else:
-            return self._on_right
+        on_right = self._on_right
+        if isinstance(on_right, tuple):
+            return list(on_right)
+        return on_right
 
     @property
+    @memoize
     def schema(self):
         """
 
@@ -354,37 +440,60 @@ class Join(Expr):
         >>> join(a, b, 'x').fields
         ['x', 'y_left', 'y_right']
         """
+
         option = lambda dt: dt if isinstance(dt, Option) else Option(dt)
 
-        joined = [[name, dt] for name, dt in self.lhs.schema[0].parameters[0]
-                  if name in self.on_left]
+        on_left = self.on_left
+        if not isinstance(on_left, list):
+            on_left = on_left,
 
-        left = [[name, dt] for name, dt in
-                zip(self.lhs.fields, types_of_fields(
-                    self.lhs.fields, self.lhs))
-                if name not in self.on_left]
+        on_right = self.on_right
+        if not isinstance(on_right, list):
+            on_right = on_right,
 
-        right = [[name, dt] for name, dt in
-                 zip(self.rhs.fields, types_of_fields(
-                     self.rhs.fields, self.rhs))
-                 if name not in self.on_right]
+        right_types = keymap(
+            dict(zip(on_right, on_left)).get,
+            self.rhs.dshape.measure.dict,
+        )
+        joined = (
+            (name, promote(dt, right_types[name], promote_option=False))
+            for n, (name, dt) in enumerate(filter(
+                compose(op.contains(on_left), first),
+                self.lhs.dshape.measure.fields,
+            ))
+        )
+
+        left = [
+            (name, dt) for name, dt in zip(
+                self.lhs.fields,
+                types_of_fields(self.lhs.fields, self.lhs)
+            ) if name not in on_left
+        ]
+
+        right = [
+            (name, dt) for name, dt in zip(
+                self.rhs.fields,
+                types_of_fields(self.rhs.fields, self.rhs)
+            ) if name not in on_right
+        ]
 
         # Handle overlapping but non-joined case, e.g.
-        left_other = [name for name, dt in left if name not in self.on_left]
-        right_other = [name for name, dt in right if name not in self.on_right]
-        overlap = set.intersection(set(left_other), set(right_other))
+        left_other = set(name for name, dt in left if name not in on_left)
+        right_other = set(name for name, dt in right if name not in on_right)
+        overlap = left_other & right_other
+
         left_suffix, right_suffix = self.suffixes
-        left = [[name + left_suffix if name in overlap else name, dt]
-                for name, dt in left]
-        right = [[name + right_suffix if name in overlap else name, dt]
-                 for name, dt in right]
+        left = ((name + left_suffix if name in overlap else name, dt)
+                for name, dt in left)
+        right = ((name + right_suffix if name in overlap else name, dt)
+                 for name, dt in right)
 
         if self.how in ('right', 'outer'):
-            left = [[name, option(dt)] for name, dt in left]
+            left = ((name, option(dt)) for name, dt in left)
         if self.how in ('left', 'outer'):
-            right = [[name, option(dt)] for name, dt in right]
+            right = ((name, option(dt)) for name, dt in right)
 
-        return dshape(Record(joined + left + right))
+        return dshape(Record(chain(joined, left, right)))
 
     @property
     def dshape(self):
@@ -413,11 +522,12 @@ def types_of_fields(fields, expr):
     else:
         if isinstance(fields, (tuple, list, set)):
             assert len(fields) == 1
-            fields = fields[0]
+            fields, = fields
         assert fields == expr._name
         return expr.dshape.measure
 
 
+@copydoc(Join)
 def join(lhs, rhs, on_left=None, on_right=None,
          how='inner', suffixes=('_left', '_right')):
     if not on_left and not on_right:
@@ -431,10 +541,28 @@ def join(lhs, rhs, on_left=None, on_right=None,
     if isinstance(on_right, tuple):
         on_right = list(on_right)
     if not on_left or not on_right:
-        raise ValueError("Can not Join.  No shared columns between %s and %s" %
-                         (lhs, rhs))
-    if types_of_fields(on_left, lhs) != types_of_fields(on_right, rhs):
-        raise TypeError("Schema's of joining columns do not match")
+        raise ValueError(
+            "Can not Join.  No shared columns between %s and %s" % (lhs, rhs),
+        )
+    left_types = listpack(types_of_fields(on_left, lhs))
+    right_types = listpack(types_of_fields(on_right, rhs))
+    if len(left_types) != len(right_types):
+        raise ValueError(
+            'Length of on_left=%d not equal to length of on_right=%d' % (
+                len(left_types), len(right_types),
+            ),
+        )
+
+    for n, promotion in enumerate(map(partial(promote, promote_option=False),
+                                      left_types,
+                                      right_types)):
+        if promotion == object_:
+            raise TypeError(
+                'Schemata of joining columns do not match,'
+                ' no promotion found for %s=%s and %s=%s' % (
+                    on_left[n], left_types[n], on_right[n], right_types[n],
+                ),
+            )
     _on_left = tuple(on_left) if isinstance(on_left, list) else on_left
     _on_right = (tuple(on_right) if isinstance(on_right, list)
                  else on_right)
@@ -446,9 +574,6 @@ def join(lhs, rhs, on_left=None, on_right=None,
                          "\nGot: %s" % how)
 
     return Join(lhs, rhs, _on_left, _on_right, how, suffixes)
-
-
-join.__doc__ = Join.__doc__
 
 
 class Concat(Expr):
@@ -514,6 +639,7 @@ def _shape_add(a, b):
     return Fixed(a.val + b.val)
 
 
+@copydoc(Concat)
 def concat(lhs, rhs, axis=0):
     ldshape = lhs.dshape
     rdshape = rhs.dshape
@@ -541,9 +667,6 @@ def concat(lhs, rhs, axis=0):
         )
 
     return Concat(lhs, rhs, axis)
-
-
-concat.__doc__ = Concat.__doc__
 
 
 class IsIn(ElemWise):
@@ -581,6 +704,7 @@ class IsIn(ElemWise):
                               self._keys)
 
 
+@copydoc(IsIn)
 def isin(expr, keys):
     if isinstance(keys, Expr):
         raise TypeError('keys argument cannot be an expression, '
@@ -589,11 +713,49 @@ def isin(expr, keys):
     return IsIn(expr, frozenset(keys))
 
 
-isin.__doc__ = IsIn.__doc__
+class Shift(Expr):
+    """ Shift a column backward or forward by N elements
+
+    Parameters
+    ----------
+    expr : Expr
+        The expression to shift. This expression's dshape should be columnar
+    n : int
+        The number of elements to shift by. If n < 0 then shift backward,
+        if n == 0 do nothing, else shift forward.
+    """
+    __slots__ = '_hash', '_child', 'n'
+
+    @property
+    def schema(self):
+        measure = self._child.schema.measure
+
+        # if we are not shifting or we are already an Option type then return
+        # the child's schema
+        if not self.n or isinstance(measure, Option):
+            return measure
+        else:
+            return Option(measure)
+
+    @property
+    def dshape(self):
+        return DataShape(*(self._child.dshape.shape + tuple(self.schema)))
+
+    def __str__(self):
+        return '%s(%s, n=%d)' % (
+            type(self).__name__.lower(), self._child, self.n
+        )
+
+
+@copydoc(Shift)
+def shift(expr, n):
+    if not isinstance(n, (numbers.Integral, np.integer)):
+        raise TypeError('n must be an integer')
+    return Shift(expr, n)
 
 
 dshape_method_list.extend([
-    (iscollection, set([sort, head])),
-    (lambda ds: len(ds.shape) == 1, set([distinct])),
+    (iscollection, set([sort, head, tail])),
+    (lambda ds: len(ds.shape) == 1, set([distinct, shift])),
     (lambda ds: len(ds.shape) == 1 and isscalar(ds.measure), set([isin])),
 ])

@@ -1,4 +1,5 @@
 from __future__ import absolute_import, division, print_function
+from copy import deepcopy
 
 from datashape.predicates import isscalar
 from multipledispatch import MDNotImplementedError
@@ -64,7 +65,7 @@ def _lean(expr, fields=None):
 
 @dispatch(Arithmetic)
 def _lean(expr, fields=None):
-    lhs, right_fields  = _lean(expr.lhs, fields=())
+    lhs, right_fields = _lean(expr.lhs, fields=())
     rhs, left_fields = _lean(expr.rhs, fields=())
     new_fields = set(fields) | set(left_fields) | set(right_fields)
 
@@ -234,3 +235,30 @@ def _lean(expr, fields=None):
         The fields that this expression requires to execute
     """
     raise NotImplementedError()
+
+
+@dispatch(Selection)
+def simple_selections(expr):
+    """Cast all ``Selection`` nodes into ``SimpleSelection`` nodes.
+
+    This causes the compute core to not treat the predicate as an input.
+
+    Parameters
+    ----------
+    expr : Expr
+        The expression to traverse.
+
+    Returns
+    -------
+    siplified : Expr
+        The expression with ``Selection``s replaces with ``SimpleSelection``s.
+    """
+    return SimpleSelection(
+        simple_selections(expr._child),
+        simple_selections(expr.predicate),
+    )
+
+
+@dispatch(Expr)
+def simple_selections(expr):
+    return expr._subs({e: simple_selections(e) for e in expr._inputs})

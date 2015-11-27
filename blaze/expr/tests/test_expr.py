@@ -1,13 +1,20 @@
 from __future__ import absolute_import, division, print_function
 
+import types
+
 import pandas as pd
 
 import pytest
 
 import datashape
-from datashape import dshape, var, datetime_, float32, int64
+from datashape import dshape, var, datetime_, float32, int64, bool_
 
-from blaze.expr import symbol, label, Field
+from blaze.expr import symbol, label, Field, Expr, Node
+
+
+def test_empty_slots():
+    assert Expr.__slots__ == ()
+    assert Node.__slots__ == ()
 
 
 def test_Symbol():
@@ -127,6 +134,15 @@ def test_map_with_rename():
     assert result.fields == ['date']
 
 
+def test_non_option_does_not_have_notnull():
+    s = symbol('s', '5 * int32')
+    assert not hasattr(s, 'notnull')
+
+
+def test_notnull_dshape():
+    assert symbol('s', '5 * ?int32').notnull().dshape == 5 * bool_
+
+
 def test_hash_to_different_values():
     s = symbol('s', var * datetime_)
     expr = s >= pd.Timestamp('20121001')
@@ -156,3 +172,17 @@ def test_coerce_record():
     s = symbol('s', 'var * {a: int64, b: float64}')
     expr = s.coerce('{a: float64, b: float32}')
     assert str(expr) == "s.coerce(to='{a: float64, b: float32}')"
+
+
+def test_method_before_name():
+    t = symbol('t', 'var * {isin: int64, max: float64, count: int64}')
+    assert isinstance(t['isin'], Field)
+    assert isinstance(t['max'], Field)
+    assert isinstance(t.max, Field)
+    assert isinstance(t.isin, Field)
+    assert isinstance(t['isin'].isin, types.MethodType)
+    assert isinstance(t['max'].max, types.MethodType)
+    assert isinstance(t.max.max, types.MethodType)
+    assert isinstance(t.isin.isin, types.MethodType)
+    with pytest.raises(AttributeError):
+        t.count.max()

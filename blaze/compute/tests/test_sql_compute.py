@@ -5,23 +5,25 @@ import pytest
 sa = pytest.importorskip('sqlalchemy')
 
 import itertools
-import re
 from distutils.version import LooseVersion
 
 
 import datashape
-from odo import into, resource
+from odo import into, resource, discover
 from pandas import DataFrame
 from toolz import unique
 
-from blaze.compute.sql import (compute, computefull, select, lower_column,
-                               compute_up)
+from blaze.compute.sql import compute, select, lower_column, compute_up
 from blaze.expr import (
-    symbol, discover, transform, summary, by, sin, join,
-    floor, cos, merge, nunique, mean, sum, count, exp, concat,
+    symbol, transform, summary, by, sin, join,
+    floor, cos, merge, nunique, mean, sum, count, exp
 )
 from blaze.compatibility import xfail
-from blaze.utils import tmpfile
+from blaze.utils import tmpfile, example, normalize
+
+
+def computefull(t, s):
+    return select(compute(t, s))
 
 
 names = ('tbl%d' % i for i in itertools.count())
@@ -54,6 +56,7 @@ def data():
 
 
 t = symbol('t', 'var * {name: string, amount: int, id: int}')
+nt = symbol('t', 'var * {name: ?string, amount: float64, id: int}')
 
 metadata = sa.MetaData()
 
@@ -70,6 +73,12 @@ tdate = symbol('t',
                     occurred_on: datetime
                 }""")
 
+ns = sa.Table('nullaccounts', metadata,
+              sa.Column('name', sa.String, nullable=True),
+              sa.Column('amount', sa.REAL),
+              sa.Column('id', sa.Integer, primary_key=True),
+              )
+
 sdate = sa.Table('accdate', metadata,
                  sa.Column('name', sa.String),
                  sa.Column('amount', sa.Integer),
@@ -85,12 +94,6 @@ sbig = sa.Table('accountsbig', metadata,
                 sa.Column('sex', sa.String),
                 sa.Column('amount', sa.Integer),
                 sa.Column('id', sa.Integer, primary_key=True))
-
-
-def normalize(s):
-    s = ' '.join(s.strip().split()).lower()
-    s = re.sub(r'(alias)_?\d*', r'\1', s)
-    return re.sub(r'__([A-Za-z_][A-Za-z_0-9]*)', r'\1', s)
 
 
 def test_table():
@@ -331,17 +334,17 @@ def test_count_on_table():
     result = compute(t[t.amount > 0].count(), s)
     assert (
         normalize(str(result)) == normalize("""
-        SELECT count(accounts.id) as count_1
+        SELECT count(accounts.id) as t_count
         FROM accounts
         WHERE accounts.amount > :amount_1""")
 
         or
 
         normalize(str(result)) == normalize("""
-        SELECT count(alias.id) as count
+        SELECT count(alias.id) as t_count
         FROM (SELECT accounts.name AS name, accounts.amount AS amount, accounts.id AS id
               FROM accounts
-              WHERE accounts.amount > :amount_1) as alias"""))
+              WHERE accounts.amount > :amount_1) as alias_2"""))
 
 
 def test_distinct():
@@ -521,15 +524,46 @@ def test_head():
 
 
 def test_label():
-    assert str(compute((t['amount'] * 10).label('foo'), s, post_compute=False))\
-        == str((s.c.amount * 10).label('foo'))
+    assert (str(compute((t['amount'] * 10).label('foo'),
+                        s, post_compute=False)) ==
+            str((s.c.amount * 10).label('foo')))
 
 
-def test_relabel():
-    result = compute(t.relabel({'name': 'NAME', 'id': 'ID'}), s)
-    expected = select([s.c.name.label('NAME'), s.c.amount, s.c.id.label('ID')])
+def test_relabel_table():
+    result = compute(t.relabel(name='NAME', id='ID'), s)
+    expected = select([
+        s.c.name.label('NAME'),
+        s.c.amount,
+        s.c.id.label('ID'),
+    ])
 
     assert str(result) == str(expected)
+
+
+def test_relabel_projection():
+    result = compute(
+        t[['name', 'id']].relabel(name='new_name', id='new_id'),
+        s,
+    )
+    assert normalize(str(result)) == normalize(
+        """SELECT
+            accounts.name AS new_name,
+            accounts.id AS new_id
+        FROM accounts""",
+    )
+
+
+def test_merge():
+    col = (t['amount'] * 2).label('new')
+
+    expr = merge(t['name'], col)
+
+    result = str(compute(expr, s))
+
+    assert 'amount * ' in result
+    assert 'FROM accounts' in result
+    assert 'SELECT accounts.name' in result
+    assert 'new' in result
 
 
 def test_projection_of_selection():
@@ -692,7 +726,6 @@ def test_clean_join():
     assert (normalize(str(result)) == normalize(expected1) or
             normalize(str(result)) == normalize(expected2))
 
-
 def test_like():
     expr = t.like(name='Alice*')
     assert normalize(str(compute(expr, s))) == normalize("""
@@ -719,15 +752,19 @@ def test_columnwise_on_complex_selection():
 
 
 def test_reductions_on_complex_selections():
-    assert normalize(str(select(compute(t[t.amount > 0].id.sum(), s)))) == \
-        normalize("""
-    with alias as
-        (select accounts.id as id
-         from
-            accounts
-         where
-            accounts.amount > :amount_1)
-    select sum(alias.id) as id_sum from alias""")
+    assert (
+        normalize(str(select(compute(t[t.amount > 0].id.sum(), s)))) ==
+        normalize(
+            """
+            select
+                sum(alias.id) as id_sum
+            from (select
+                    accounts.id as id
+                  from accounts
+                  where accounts.amount > :amount_1) as alias
+            """
+        )
+    )
 
 
 def test_clean_summary_by_where():
@@ -891,9 +928,16 @@ def test_join_on_same_table():
     result = compute(expr, {t: T})
 
     assert normalize(str(result)) == normalize("""
-    SELECT tab_left.a, tab_left.b, tab_right.b
-    FROM tab AS tab_left JOIN tab AS tab_right
-    ON tab_left.a = tab_right.a
+    SELECT
+        tab_left.a,
+        tab_left.b as b_left,
+        tab_right.b as b_right
+    FROM
+        tab AS tab_left
+    JOIN
+        tab AS tab_right
+    ON
+        tab_left.a = tab_right.a
     """)
 
     expr = join(t, t, 'a').b_left.sum()
@@ -901,12 +945,16 @@ def test_join_on_same_table():
     result = compute(expr, {t: T})
 
     assert normalize(str(result)) == normalize("""
-   with alias as
-    (select tab_left.b as b
-     from tab as tab_left
-        join tab as tab_right
-        on tab_left.a = tab_right.a)
-    select sum(alias.b) as b_left_sum from alias""")
+    select sum(alias.b_left) as b_left_sum from
+        (select
+            tab_left.b as b_left
+        from
+            tab as tab_left
+        join
+            tab as tab_right
+        on
+            tab_left.a = tab_right.a) as
+        alias""")
 
     expr = join(t, t, 'a')
     expr = summary(total=expr.a.sum(), smallest=expr.b_right.min())
@@ -914,9 +962,15 @@ def test_join_on_same_table():
     result = compute(expr, {t: T})
 
     assert normalize(str(result)) == normalize("""
-    SELECT min(tab_right.b) as smallest, sum(tab_left.a) as total
-    FROM tab AS tab_left JOIN tab AS tab_right
-    ON tab_left.a = tab_right.a
+    SELECT
+        min(tab_right.b) as smallest,
+        sum(tab_left.a) as total
+    FROM
+        tab AS tab_left
+    JOIN
+        tab AS tab_right
+    ON
+        tab_left.a = tab_right.a
     """)
 
 
@@ -934,9 +988,16 @@ def test_join_suffixes():
     result = compute(expr, {t: T})
 
     assert normalize(str(result)) == normalize("""
-    SELECT tab{l}.a, tab{l}.b, tab{r}.b
-    FROM tab AS tab{l} JOIN tab AS tab{r}
-    ON tab{l}.a = tab{r}.a
+    SELECT
+        tab{l}.a,
+        tab{l}.b as b{l},
+        tab{r}.b as b{r}
+    FROM
+        tab AS tab{l}
+    JOIN
+        tab AS tab{r}
+    ON
+        tab{l}.a = tab{r}.a
     """.format(l=suffixes[0], r=suffixes[1]))
 
 
@@ -1286,8 +1347,6 @@ def test_transform_filter_by_different_order():
     assert normalize(str(result)) == expected
 
 
-@pytest.mark.xfail(raises=ValueError,
-                   reason='Need to allow Merge expressions to be groupers')
 def test_transform_filter_by_projection():
     t2 = transform(t, abs_amt=abs(t.amount), sine=sin(t.id))
     tr = t2[t2.amount < 0]
@@ -1322,8 +1381,20 @@ def test_merge_compute():
         result = into(list, compute(expr, {s: data}))
 
         assert result == [(1, 'Alice', 100, 1000),
-                          (2, 'Bob',   200, 2000),
+                          (2, 'Bob', 200, 2000),
                           (4, 'Dennis', 400, 4000)]
+
+
+def test_notnull():
+    result = compute(nt[nt.name.notnull()], ns)
+    expected = """SELECT
+        nullaccounts.name,
+        nullaccounts.amount,
+        nullaccounts.id
+    FROM nullaccounts
+    WHERE nullaccounts.name is not null
+    """
+    assert normalize(str(result)) == normalize(expected)
 
 
 def test_head_limit():
@@ -1359,25 +1430,39 @@ def test_no_extraneous_join():
     result = compute(expr, db)
 
     assert normalize(str(result)) == normalize("""
-    SELECT alias.operation, alias.name, alias.datetime_nearest_receiver,
-           alias.aircraft, alias.temperature_2m, alias.temperature_5cm,
-           alias.humidity, alias.windspeed, alias.pressure,
-           alias.include, alias.datetime_nearest_close
-          FROM (SELECT event.name AS name,
-                       event.operation AS operation,
-                       event.datetime_nearest_receiver AS datetime_nearest_receiver,
-                       event.aircraft AS aircraft,
-                       event.temperature_2m AS temperature_2m,
-                       event.temperature_5cm AS temperature_5cm,
-                       event.humidity AS humidity,
-                       event.windspeed AS windspeed,
-                       event.pressure AS pressure,
-                       event.include AS include
-                FROM event WHERE event.include = 1) AS alias1
-                JOIN (SELECT  operation.name AS name,
-                              operation.datetime_nearest_close as datetime_nearest_close
-                      FROM operation) AS alias2
-                ON alias1.operation = alias2.name
+    SELECT
+        alias.operation,
+        alias.name as name_left,
+        alias.datetime_nearest_receiver,
+        alias.aircraft,
+        alias.temperature_2m,
+        alias.temperature_5cm,
+        alias.humidity,
+        alias.windspeed,
+        alias.pressure,
+        alias.include,
+        alias.datetime_nearest_close
+    FROM
+        (SELECT
+             event.name AS name,
+             event.operation AS operation,
+             event.datetime_nearest_receiver AS datetime_nearest_receiver,
+             event.aircraft AS aircraft,
+             event.temperature_2m AS temperature_2m,
+             event.temperature_5cm AS temperature_5cm,
+             event.humidity AS humidity,
+             event.windspeed AS windspeed,
+             event.pressure AS pressure,
+             event.include AS include
+         FROM
+             event WHERE event.include = 1) AS alias1
+    JOIN
+        (SELECT
+             operation.name AS name,
+             operation.datetime_nearest_close as datetime_nearest_close
+         FROM operation) AS alias2
+    ON
+        alias1.operation = alias2.name
     """)
 
 
@@ -1498,11 +1583,11 @@ def test_transform_then_project():
 def test_reduce_does_not_compose():
     expr = by(t.name, counts=t.count()).counts.max()
     result = str(compute(expr, s))
-    expected = """WITH alias AS
-(SELECT count(accounts.id) AS counts
-FROM accounts GROUP BY accounts.name)
- SELECT max(alias.counts) AS counts_max
-FROM alias"""
+    expected = """
+    SELECT max(alias.counts) AS counts_max
+    FROM
+    (SELECT count(accounts.id) AS counts
+    FROM accounts GROUP BY accounts.name) as alias"""
     assert normalize(result) == normalize(expected)
 
 
@@ -1611,3 +1696,213 @@ def test_coerce():
     FROM accounts"""
     result = compute(expr, s)
     assert normalize(str(result)) == normalize(expected)
+
+
+def test_multi_column_by_after_transform():
+    tbl = transform(t, new_amount=t.amount + 1, one_two=t.amount * 2)
+    expr = by(tbl[['name', 'one_two']], avg_amt=tbl.new_amount.mean())
+    result = compute(expr, s)
+    expected = """SELECT
+        accounts.name,
+        accounts.amount * :amount_1 as one_two,
+        avg(accounts.amount + :amount_2) as avg_amt
+    FROM
+        accounts
+    GROUP BY
+        accounts.name, accounts.amount * :amount_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_multi_column_by_after_transform_and_filter():
+    tbl = t[t.name == 'Alice']
+    tbl = transform(tbl, new_amount=tbl.amount + 1, one_two=tbl.amount * 2)
+    expr = by(tbl[['name', 'one_two']], avg_amt=tbl.new_amount.mean())
+    result = compute(expr, s)
+    expected = """SELECT
+        accounts.name,
+        accounts.amount * :amount_1 as one_two,
+        avg(accounts.amount + :amount_2) as avg_amt
+    FROM
+        accounts
+    WHERE
+        accounts.name = :name_1
+    GROUP BY
+        accounts.name, accounts.amount * :amount_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_attribute_access_on_transform_filter():
+    tbl = transform(t, new_amount=t.amount + 1)
+    expr = tbl[tbl.name == 'Alice'].new_amount
+    result = compute(expr, s)
+    expected = """SELECT
+        accounts.amount + :amount_1 as new_amount
+    FROM
+        accounts
+    WHERE
+        accounts.name = :name_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_attribute_on_filter_transform_groupby():
+    tbl = t[t.name == 'Alice']
+    tbl = transform(tbl, new_amount=tbl.amount + 1, one_two=tbl.amount * 2)
+    gb = by(tbl[['name', 'one_two']], avg_amt=tbl.new_amount.mean())
+    expr = gb.avg_amt
+    result = compute(expr, s)
+    expected = """SELECT
+        avg(accounts.amount + :amount_1) as avg_amt
+    FROM
+        accounts
+    WHERE
+        accounts.name = :name_1
+    GROUP BY
+        accounts.name, accounts.amount * :amount_2
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_label_projection():
+    tbl = t[(t.name == 'Alice')]
+    tbl = transform(tbl, new_amount=tbl.amount + 1, one_two=tbl.amount * 2)
+    expr = tbl[['new_amount', 'one_two']]
+
+    # column selection shouldn't affect the resulting SQL
+    result = compute(expr[expr.new_amount > 1].one_two, s)
+    result2 = compute(expr.one_two[expr.new_amount > 1], s)
+
+    expected = """SELECT
+        accounts.amount * :amount_1 as one_two
+    FROM accounts
+    WHERE accounts.name = :name_1 and accounts.amount + :amount_2 > :param_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+    assert normalize(str(result2)) == normalize(expected)
+
+
+def test_baseball_nested_by():
+    data = resource('sqlite:///%s' % example('teams.db'))
+    dshape = discover(data)
+    d = symbol('d', dshape)
+    expr = by(d.teams.name,
+              start_year=d.teams.yearID.min()).start_year.count_values()
+    result = compute(expr, data, post_compute=False)
+    expected = """SELECT
+        anon_1.start_year,
+        anon_1.count
+    FROM
+        (SELECT
+            alias.start_year as start_year,
+            count(alias.start_year) as count
+         FROM
+            (SELECT
+                min(teams.yearid) as start_year
+             FROM teams
+             GROUP BY teams.name) as alias
+         GROUP BY alias.start_year) as anon_1 ORDER BY anon_1.count DESC
+    """
+    assert normalize(str(result).replace('"', '')) == normalize(expected)
+
+
+def test_label_on_filter():
+    expr = t[t.name == 'Alice'].amount.label('foo').head(2)
+    result = compute(expr, s)
+    expected = """SELECT
+        accounts.amount AS foo
+    FROM
+        accounts
+    WHERE
+        accounts.name = :name_1
+    LIMIT :param_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_single_field_filter():
+    expr = t.amount[t.amount > 0]
+    result = compute(expr, s)
+    expected = """SELECT
+        accounts.amount
+    FROM accounts
+    WHERE accounts.amount > :amount_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_multiple_field_filter():
+    expr = t.name[t.amount > 0]
+    result = compute(expr, s)
+    expected = """SELECT
+        accounts.name
+    FROM accounts
+    WHERE accounts.amount > :amount_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_distinct_on_label():
+    expr = t.name.label('foo').distinct()
+    result = compute(expr, s)
+    expected = """SELECT
+        DISTINCT accounts.name AS foo
+    FROM accounts
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+@pytest.mark.parametrize('n', [-1, 0, 1])
+def test_shift_on_column(n):
+    expr = t.name.shift(n)
+    result = compute(expr, s)
+    expected = """SELECT
+        lag(accounts.name, :lag_1) over () as name
+    FROM accounts
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_empty_string_comparison_with_option_type():
+    expr = nt.amount[nt.name == '']
+    result = compute(expr, s)
+    expected = """
+    SELECT accounts.amount
+    FROM accounts
+    WHERE accounts.name = :name_1
+    """
+    assert normalize(str(result)) == normalize(expected)
+
+
+def test_tail_no_sort():
+    assert (
+        normalize(str(compute(t.head(), {t: s}))) ==
+        normalize(str(compute(t.tail(), {t: s})))
+    )
+
+
+def test_tail_of_sort():
+    expected = normalize(str(compute(
+        t.sort('id', ascending=False).head(5).sort('id'),
+        {t: s},
+    )))
+    result = normalize(str(compute(t.sort('id').tail(5), {t: s})))
+    assert expected == result
+
+
+def test_tail_sort_in_chilren():
+    expected = normalize(str(compute(
+        t.name.sort('id', ascending=False).head(5).sort('id'),
+        {t: s},
+    )))
+    result = normalize(str(compute(t.name.sort('id').tail(5), {t: s})))
+    assert expected == result
+
+
+def test_selection_inner_inputs():
+    result = normalize(str(compute(t[t.id == tdate.id], {t: s, tdate: sdate})))
+    expected = normalize("""
+    select {a}.name, {a}.amount, {a}.id from {a}, {b} where {a}.id = {b}.id
+    """).format(a=s.name, b=sdate.name)
+    assert result == expected

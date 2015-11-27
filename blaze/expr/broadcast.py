@@ -1,14 +1,14 @@
 from __future__ import absolute_import, division, print_function
 
-from datashape import *
-from datashape.predicates import iscollection
 import itertools
+
 from toolz import curry
 
-from .expressions import *
-from .expressions import Field, Map
-from .arithmetic import maxshape, Arithmetic, UnaryOp
-from .math import Math, sin
+from datashape import DataShape, iscollection
+
+from .collections import Shift
+from .expressions import Field, Map, ElemWise, symbol, shape, Coerce
+from .arithmetic import maxshape, UnaryOp, BinOp
 from .datetime import DateTime
 
 __all__ = ['broadcast', 'Broadcast', 'scalar_symbols']
@@ -23,10 +23,12 @@ def broadcast(expr, leaves, scalars=None):
 
 
 class Broadcast(ElemWise):
+
     """ Fuse scalar expressions over collections
 
     Given elementwise operations on collections, e.g.
 
+    >>> from blaze import sin
     >>> a = symbol('a', '100 * int')
     >>> t = symbol('t', '100 * {x: int, y: int}')
 
@@ -67,6 +69,7 @@ class Broadcast(ElemWise):
         return self._scalar_expr._subs(dict(zip(self._scalars,
                                                 self._children)))
 
+
 def scalar_symbols(exprs):
     """
     Gives a sequence of scalar symbols to mirror these expressions
@@ -100,12 +103,14 @@ def scalar_symbols(exprs):
     return scalars
 
 
-Broadcastable = (Arithmetic, Math, Map, Field, DateTime, UnaryOp)
-WantToBroadcast = (Arithmetic, Math, Map, DateTime, UnaryOp)
+Broadcastable = (Map, Field, DateTime, UnaryOp, BinOp, Coerce, Shift)
+WantToBroadcast = (Map, DateTime, UnaryOp, BinOp, Coerce, Shift)
 
 
-def broadcast_collect(expr, Broadcastable=Broadcastable,
-                            WantToBroadcast=WantToBroadcast):
+def broadcast_collect(expr,
+                      broadcastable=Broadcastable,
+                      want_to_broadcast=WantToBroadcast,
+                      no_recurse=None):
     """ Collapse expression down using Broadcast - Tabular cases only
 
     Expressions of type Broadcastables are swallowed into Broadcast
@@ -122,15 +127,20 @@ def broadcast_collect(expr, Broadcastable=Broadcastable,
     >>> broadcast_collect(expr)
     Broadcast(_children=(t,), _scalars=(t,), _scalar_expr=t.x + (2 * (exp(-((t.x - 1.3) ** 2)))))
     """
-    if (isinstance(expr, WantToBroadcast) and
-        iscollection(expr.dshape)):
-        leaves = leaves_of_type(Broadcastable, expr)
+    if (isinstance(expr, want_to_broadcast) and
+            iscollection(expr.dshape)):
+        leaves = leaves_of_type(broadcastable, expr)
         expr = broadcast(expr, sorted(leaves, key=str))
 
+    if no_recurse is not None and isinstance(expr, no_recurse):
+        return expr
+
     # Recurse down
-    children = [broadcast_collect(i, Broadcastable, WantToBroadcast)
-            for i in expr._inputs]
-    return expr._subs(dict(zip(expr._inputs, children)))
+    children = (
+        broadcast_collect(i, broadcastable, want_to_broadcast, no_recurse)
+        for i in expr._inputs
+    )
+    return expr._subs({e: c for e, c in zip(expr._inputs, children)})
 
 
 @curry

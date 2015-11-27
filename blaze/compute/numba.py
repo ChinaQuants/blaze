@@ -9,13 +9,13 @@ import numba
 from datashape import isdatelike, TimeDelta
 
 from .core import optimize
-from ..expr import Expr, Arithmetic, Math, Map, UnaryOp
 from ..expr.strings import isstring
+from ..expr import Expr, Map, BinOp, UnaryOp
 from ..expr.broadcast import broadcast_collect, Broadcast
 from .pyfunc import funcstr
 
 
-Broadcastable = Arithmetic, Math, Map, UnaryOp
+Broadcastable = BinOp, Map, UnaryOp
 lock = threading.Lock()
 
 
@@ -32,8 +32,11 @@ def optimize_ndarray(expr, *data, **kwargs):
                 for dt in leaf.dshape.measure.types)):
             return expr
     else:
-        return broadcast_collect(expr, Broadcastable=Broadcastable,
-                                 WantToBroadcast=Broadcastable)
+        return broadcast_collect(
+            expr,
+            broadcastable=Broadcastable,
+            want_to_broadcast=Broadcastable,
+        )
 
 
 for i in range(1, 11):
